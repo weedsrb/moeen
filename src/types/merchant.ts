@@ -18,6 +18,8 @@ export interface MerchantSettings {
   merchant_id: string;
   telegram_bot_token: string | null;
   telegram_connected: boolean;
+  telegram_bot_username: string | null;
+  telegram_webhook_secret: string | null;
   whatsapp_connected: boolean;
   ai_confidence_threshold: number;
   ai_auto_clarify: boolean;
