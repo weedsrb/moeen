@@ -41,6 +41,10 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# supabase local dev
+supabase/.temp/
+supabase/seed.sql
+
 # claude
 .claude
 AGENTS.md
