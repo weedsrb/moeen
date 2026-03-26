@@ -21,3 +21,16 @@ export interface Product {
   created_at: string;
   updated_at: string;
 }
+
+export type StockStatus = "in_stock" | "low_stock" | "out_of_stock";
+
+export interface StockAdjustment {
+  id: string;
+  merchant_id: string;
+  product_id: string;
+  adjustment: number;
+  reason: string;
+  previous_quantity: number;
+  new_quantity: number;
+  created_at: string;
+}

@@ -1,0 +1,83 @@
+"use client";
+
+import Link from "next/link";
+import { cn } from "@/lib/utils";
+import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Package } from "lucide-react";
+import { StockBar } from "./stock-bar";
+import type { Product } from "@/types/product";
+import {
+  getStockStatus,
+  getStockRowClass,
+  getStockBadgeVariant,
+  getStockLabel,
+  getAvailableQuantity,
+  formatPrice,
+} from "@/lib/utils/inventory";
+
+interface ProductCardProps {
+  product: Product;
+  merchantThreshold?: number;
+}
+
+export function ProductCard({ product, merchantThreshold }: ProductCardProps) {
+  const status = getStockStatus(product, merchantThreshold);
+  const available = getAvailableQuantity(product);
+
+  return (
+    <Link href={`/inventory/${product.id}`}>
+      <Card
+        className={cn(
+          "transition-colors hover:border-foreground/20 cursor-pointer",
+          getStockRowClass(status)
+        )}
+      >
+        <CardContent className="p-4 space-y-3">
+          {/* Image */}
+          <div className="aspect-square rounded-md bg-muted overflow-hidden flex items-center justify-center">
+            {product.image_url ? (
+              <img
+                src={product.image_url}
+                alt={product.name}
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <Package className="h-8 w-8 text-muted-foreground/40" />
+            )}
+          </div>
+
+          {/* Info */}
+          <div className="space-y-1">
+            <h3 className="font-medium text-sm truncate">{product.name}</h3>
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-sm">
+                {formatPrice(product.price, product.currency)}
+              </span>
+              <Badge variant={getStockBadgeVariant(status)}>
+                {getStockLabel(status)}
+              </Badge>
+            </div>
+          </div>
+
+          {/* Stock bar */}
+          <StockBar product={product} merchantThreshold={merchantThreshold} />
+
+          {/* Quantities */}
+          <div className="flex justify-between text-xs text-muted-foreground">
+            <span>
+              Total: <span className="font-mono">{product.quantity_total}</span>
+            </span>
+            <span>
+              Reserved:{" "}
+              <span className="font-mono">{product.quantity_reserved}</span>
+            </span>
+            <span>
+              Avail: <span className="font-mono">{available}</span>
+            </span>
+          </div>
+        </CardContent>
+      </Card>
+    </Link>
+  );
+}

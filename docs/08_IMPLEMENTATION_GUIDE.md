@@ -9,15 +9,15 @@
 | Phase | Name | Duration | Goal |
 |-------|------|----------|------|
 | 0 | Project Setup | 1-2 days | Dev environment, project scaffold, tools configured |
+| 0.5 | Landing Page | 1.5 days | Public site, animations, SEO, early access CTA |
 | 1 | Foundation | 1 week | Auth, database, basic layout, navigation |
 | 2 | Catalog & Inventory | 1 week | Product management, stock tracking |
 | 3 | Telegram Integration | 1 week | Bot setup, message receiving, conversation UI |
 | 4 | AI Pipeline | 1 week | RegEx filter, Gemini integration, order extraction |
 | 5 | Order Management | 1 week | Order lifecycle, status board, split view |
 | 6 | Automation (n8n) | 1 week | All workflows, flags system, notifications |
-| 7 | Landing Page | 1 week | Public site, animations, SEO |
-| 8 | Polish & Testing | 1 week | Bug fixes, edge cases, mobile optimization |
-| 9 | Pilot Launch | Ongoing | 3-5 real merchants, feedback loops |
+| 7 | Polish & Testing | 1 week | Bug fixes, edge cases, mobile optimization |
+| 8 | Pilot Launch | Ongoing | 3-5 real merchants, feedback loops |
 
 **Total estimated build time: 8-9 weeks**
 
@@ -94,6 +94,56 @@ Read these docs in order before making changes:
 
 ---
 
+## Phase 0.5: Landing Page
+
+**Goal:** Beautiful, animated public page that converts visitors to sign-ups. Built before the core app so something is live immediately.
+
+### Tasks
+
+- [ ] Build navbar component
+  - Fixed at top, transparent → solid on scroll (`backdrop-blur-md`)
+  - Mo'een logo (text-based: "Mo'een | معين")
+  - "Request Early Access" CTA button
+  - Responsive (collapses on mobile)
+- [ ] Build hero section
+  - Headline: "You wake up to 50 messages. Half are orders. Which half?"
+  - Subheadline explaining Mo'een's value
+  - Two CTAs: "Request Early Access" (primary) + "ابدأ هلق" (outline)
+  - GSAP animation (~2.5s): message cards cascade in → pile up chaotically → dashboard slides in → cards reorganize into clean order cards
+  - Mobile: reduced to 3 message cards, shorter timeline
+  - `prefers-reduced-motion`: skip to final state
+- [ ] Build problem section
+  - 4 chaos scenario cards (lost order, angry follow-up, out-of-stock surprise, duplicate order)
+  - Horizontal snap-scroll (mobile), 2x2 grid (tablet), row (desktop)
+  - GSAP ScrollTrigger stagger entrance
+- [ ] Build solution section
+  - Same 4 problems paired with Mo'een features
+  - Side-by-side: chaos message → clean order card
+  - GSAP ScrollTrigger per pair
+  - AI violet badge on solution cards
+- [ ] Build "How it works" section
+  - 3 steps: Connect Telegram → AI Sorts → You Act
+  - Horizontal connected steps (desktop), vertical timeline (mobile)
+  - GSAP sequential reveal with connecting line
+- [ ] Build trust section
+  - Video placeholder (16:9, "Demo coming soon")
+  - "Built in Palestine, for Palestine" mission text
+- [ ] Build footer CTA section
+  - "Be the first to try Mo'een" headline
+  - "Request Early Access" button linking to `/signup`
+  - Waitlist email capture form will be added in Phase 1
+- [ ] SEO optimization
+  - Meta tags, Open Graph, Twitter cards
+  - Server-side rendering (Server Component shell with Client Component islands)
+- [ ] Mobile optimization
+  - All sections responsive across mobile/tablet/desktop breakpoints
+  - CSS logical properties for RTL readiness
+  - Reduced animation on `prefers-reduced-motion`
+
+### Milestone: Landing page live at `/`, all sections animated, CTA links to signup
+
+---
+
 ## Phase 1: Foundation
 
 **Goal:** Auth working, database created, app shell with navigation.
@@ -103,9 +153,14 @@ Read these docs in order before making changes:
 - [ ] Run Supabase migrations — create all tables from DATABASE_SCHEMA.md
   - merchants, merchant_settings, customers, conversations, messages
   - products, orders, order_items, order_timeline, flags
+  - `waitlist` table (email capture for landing page)
   - All RLS policies
   - All indexes
   - Database functions (generate_order_number, inventory triggers)
+- [ ] Wire up landing page waitlist
+  - Create `app/api/waitlist/route.ts` API endpoint
+  - Add email capture form to landing page footer CTA section
+  - Connect form to Supabase `waitlist` table
 - [ ] Set up Supabase Auth
   - Enable Google provider
   - Enable email/password provider
@@ -349,45 +404,7 @@ Read these docs in order before making changes:
 
 ---
 
-## Phase 7: Landing Page
-
-**Goal:** Beautiful, animated public page that converts visitors to sign-ups.
-
-### Tasks
-
-- [ ] Build hero section
-  - Headline, subheadline, CTA button
-  - GSAP animation: message chaos → organized dashboard
-  - Mobile-responsive hero
-- [ ] Build problem section
-  - Scrolling message cards showing chaos scenarios
-  - GSAP ScrollTrigger animations
-- [ ] Build solution section
-  - Problem → Mo'een feature mapping
-  - Side-by-side comparisons with animations
-- [ ] Build "How it works" section
-  - 3-step visual flow
-  - Animated step progression
-- [ ] Build trust section
-  - Demo video embed (record from working product)
-  - Testimonials (from pilot merchants when available)
-- [ ] Build footer with CTA
-  - Email capture for early access
-  - Store email in Supabase `waitlist` table
-- [ ] SEO optimization
-  - Meta tags, Open Graph, structured data
-  - Server-side rendering for all landing page content
-  - Performance optimization (image lazy loading, code splitting)
-- [ ] Mobile optimization
-  - All sections work beautifully on mobile
-  - Touch-friendly interactions
-  - Reduced animation on mobile for performance
-
-### Milestone: Landing page live, beautiful, and converting
-
----
-
-## Phase 8: Polish & Testing
+## Phase 7: Polish & Testing
 
 **Goal:** Everything works reliably, edge cases handled, mobile-perfect.
 
@@ -424,7 +441,7 @@ Read these docs in order before making changes:
 
 ---
 
-## Phase 9: Pilot Launch
+## Phase 8: Pilot Launch
 
 **Goal:** 3-5 real merchants using Mo'een daily.
 

@@ -1,7 +1,51 @@
-export default function InventoryPage() {
+import { PageTransition } from "@/components/layout/page-transition";
+import { InventoryContent } from "@/components/inventory/inventory-content";
+import { createClient } from "@/lib/supabase/server";
+import { redirect } from "next/navigation";
+
+export default async function InventoryPage() {
+  const supabase = await createClient();
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+
+  const { data: merchant } = await supabase
+    .from("merchants")
+    .select("id")
+    .eq("user_id", user.id)
+    .single();
+
+  if (!merchant) redirect("/onboarding");
+
+  // Fetch products
+  const { data: products } = await supabase
+    .from("products")
+    .select("*")
+    .eq("merchant_id", merchant.id)
+    .eq("is_active", true)
+    .order("created_at", { ascending: false });
+
+  // Fetch merchant settings for default low stock threshold
+  const { data: settings } = await supabase
+    .from("merchant_settings")
+    .select("low_stock_threshold")
+    .eq("merchant_id", merchant.id)
+    .single();
+
+  const merchantThreshold = settings?.low_stock_threshold ?? 5;
+
   return (
-    <div className="p-6">
-      <h1 className="text-2xl font-semibold">Inventory</h1>
-    </div>
+    <PageTransition>
+      <div className="space-y-6">
+        <h1 className="text-2xl font-semibold">Inventory</h1>
+        <InventoryContent
+          initialProducts={products ?? []}
+          merchantId={merchant.id}
+          merchantThreshold={merchantThreshold}
+        />
+      </div>
+    </PageTransition>
   );
 }
