@@ -1,0 +1,16 @@
+branch=$(git rev-parse --abbrev-ref HEAD)
+
+# Allow main branch pushes
+if [ "$branch" = "main" ]; then
+  exit 0
+fi
+
+# Enforce branch naming: type/description
+if ! echo "$branch" | grep -qE '^(feature|fix|chore|docs|refactor|hotfix)/[a-z0-9-]+$'; then
+  echo ""
+  echo "  Branch name '$branch' does not follow the naming convention."
+  echo "  Use: feature/, fix/, chore/, docs/, refactor/, or hotfix/"
+  echo "  Example: feature/phase-4-ai-pipeline"
+  echo ""
+  exit 1
+fi
