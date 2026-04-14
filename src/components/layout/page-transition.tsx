@@ -1,13 +1,20 @@
 "use client";
 
 import { motion } from "framer-motion";
+import { cn } from "@/lib/utils";
 
-export function PageTransition({ children }: { children: React.ReactNode }) {
+interface PageTransitionProps {
+  children: React.ReactNode;
+  className?: string;
+}
+
+export function PageTransition({ children, className }: PageTransitionProps) {
   return (
     <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.3, ease: "easeOut" }}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.15, ease: "easeOut" }}
+      className={cn("flex-1 min-h-0 overflow-y-auto px-1", className)}
     >
       {children}
     </motion.div>

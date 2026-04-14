@@ -24,32 +24,32 @@ export default async function ProductDetailPage({
 
   if (!merchant) redirect("/onboarding");
 
-  // Fetch product
-  const { data: product } = await supabase
-    .from("products")
-    .select("*")
-    .eq("id", id)
-    .eq("merchant_id", merchant.id)
-    .single();
+  // Parallel fetch: product, settings, adjustments
+  const [productResult, settingsResult, adjustmentsResult] = await Promise.all([
+    supabase
+      .from("products")
+      .select("*")
+      .eq("id", id)
+      .eq("merchant_id", merchant.id)
+      .single(),
+    supabase
+      .from("merchant_settings")
+      .select("low_stock_threshold")
+      .eq("merchant_id", merchant.id)
+      .single(),
+    supabase
+      .from("stock_adjustments")
+      .select("*")
+      .eq("product_id", id)
+      .order("created_at", { ascending: false })
+      .limit(50),
+  ]);
 
+  const product = productResult.data;
   if (!product) notFound();
 
-  // Fetch merchant settings
-  const { data: settings } = await supabase
-    .from("merchant_settings")
-    .select("low_stock_threshold")
-    .eq("merchant_id", merchant.id)
-    .single();
-
-  const merchantThreshold = settings?.low_stock_threshold ?? 5;
-
-  // Fetch stock adjustments
-  const { data: adjustments } = await supabase
-    .from("stock_adjustments")
-    .select("*")
-    .eq("product_id", id)
-    .order("created_at", { ascending: false })
-    .limit(50);
+  const merchantThreshold = settingsResult.data?.low_stock_threshold ?? 5;
+  const adjustments = adjustmentsResult.data;
 
   return (
     <PageTransition>

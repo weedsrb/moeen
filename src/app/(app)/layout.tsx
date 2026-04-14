@@ -52,7 +52,7 @@ export default async function AppLayout({
         <Sidebar />
         <div className="flex flex-1 flex-col min-w-0">
           <TopBar />
-          <main className="flex-1 overflow-auto p-4 sm:p-6 pb-20 sm:pb-6">
+          <main className="flex-1 flex flex-col overflow-hidden p-4 sm:p-6 pb-20 sm:pb-6">
             {children}
           </main>
         </div>

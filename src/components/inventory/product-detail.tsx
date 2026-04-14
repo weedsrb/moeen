@@ -148,8 +148,8 @@ export function ProductDetail({
             <div>
               <p className="text-sm text-muted-foreground mb-1">Variants</p>
               <div className="space-y-1">
-                {product.variants.map((v) => (
-                  <p key={v.name} className="text-sm">
+                {product.variants.map((v, i) => (
+                  <p key={`${v.name}-${i}`} className="text-sm">
                     <span className="font-medium">{v.name}:</span>{" "}
                     {v.options.join(", ")}
                   </p>

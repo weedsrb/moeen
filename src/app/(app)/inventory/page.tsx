@@ -19,22 +19,23 @@ export default async function InventoryPage() {
 
   if (!merchant) redirect("/onboarding");
 
-  // Fetch products
-  const { data: products } = await supabase
-    .from("products")
-    .select("*")
-    .eq("merchant_id", merchant.id)
-    .eq("is_active", true)
-    .order("created_at", { ascending: false });
+  // Parallel fetch: products + settings
+  const [productsResult, settingsResult] = await Promise.all([
+    supabase
+      .from("products")
+      .select("*")
+      .eq("merchant_id", merchant.id)
+      .eq("is_active", true)
+      .order("created_at", { ascending: false }),
+    supabase
+      .from("merchant_settings")
+      .select("low_stock_threshold")
+      .eq("merchant_id", merchant.id)
+      .single(),
+  ]);
 
-  // Fetch merchant settings for default low stock threshold
-  const { data: settings } = await supabase
-    .from("merchant_settings")
-    .select("low_stock_threshold")
-    .eq("merchant_id", merchant.id)
-    .single();
-
-  const merchantThreshold = settings?.low_stock_threshold ?? 5;
+  const products = productsResult.data;
+  const merchantThreshold = settingsResult.data?.low_stock_threshold ?? 5;
 
   return (
     <PageTransition>
