@@ -1,49 +1,44 @@
-"use client";
-
-import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
-import { useMerchant } from "@/components/layout/merchant-provider";
+import { createClient } from "@/lib/supabase/server";
+import { redirect } from "next/navigation";
 import { PageTransition } from "@/components/layout/page-transition";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
-import { TelegramConnection } from "@/components/settings/telegram-connection";
-import { LogOut } from "lucide-react";
+import { WhatsAppConnection } from "@/components/settings/whatsapp-connection";
+import { SignOutButton } from "@/components/settings/sign-out-button";
+import { AIBehaviorSettings } from "@/components/settings/ai-behavior-settings";
+import { AIPersonaSettings } from "@/components/settings/ai-persona-settings";
+import { AIFAQSettings } from "@/components/settings/ai-faq-settings";
 
-export default function SettingsPage() {
-  const merchant = useMerchant();
-  const router = useRouter();
-  const supabase = createClient();
+export default async function SettingsPage() {
+  const supabase = await createClient();
 
-  const [telegramLoading, setTelegramLoading] = useState(true);
-  const [telegramConnected, setTelegramConnected] = useState(false);
-  const [telegramBotUsername, setTelegramBotUsername] = useState<string | null>(
-    null
-  );
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
 
-  useEffect(() => {
-    async function fetchTelegramStatus() {
-      const { data } = await supabase
-        .from("merchant_settings")
-        .select("telegram_connected, telegram_bot_username")
-        .eq("merchant_id", merchant.id)
-        .single();
+  const { data: merchant } = await supabase
+    .from("merchants")
+    .select("id, business_name, business_type, city")
+    .eq("user_id", user.id)
+    .single();
 
-      if (data) {
-        setTelegramConnected(data.telegram_connected ?? false);
-        setTelegramBotUsername(data.telegram_bot_username ?? null);
-      }
-      setTelegramLoading(false);
-    }
+  if (!merchant) redirect("/onboarding");
 
-    fetchTelegramStatus();
-  }, [merchant.id, supabase]);
+  const [settingsResult, faqResult] = await Promise.all([
+    supabase
+      .from("merchant_settings")
+      .select("whatsapp_connected, whatsapp_display_phone, ai_confidence_threshold, ai_auto_clarify, ai_handoff_message, ai_persona_name, ai_tone, ai_greeting, ai_business_context, ai_custom_instructions, ai_response_language, ai_auto_acknowledge, ai_acknowledge_template")
+      .eq("merchant_id", merchant.id)
+      .single(),
 
-  async function handleSignOut() {
-    await supabase.auth.signOut();
-    router.push("/login");
-  }
+    supabase
+      .from("merchant_faq")
+      .select("id, question, answer, display_order")
+      .eq("merchant_id", merchant.id)
+      .order("display_order"),
+  ]);
+
+  const s = settingsResult.data;
 
   return (
     <PageTransition>
@@ -58,15 +53,13 @@ export default function SettingsPage() {
           <CardContent className="space-y-2">
             <div className="flex justify-between">
               <span className="text-sm text-muted-foreground">Name</span>
-              <span className="text-sm font-medium">
-                {merchant.businessName}
-              </span>
+              <span className="text-sm font-medium">{merchant.business_name}</span>
             </div>
-            {merchant.businessType && (
+            {merchant.business_type && (
               <div className="flex justify-between">
                 <span className="text-sm text-muted-foreground">Type</span>
                 <span className="text-sm font-medium capitalize">
-                  {merchant.businessType}
+                  {merchant.business_type}
                 </span>
               </div>
             )}
@@ -79,35 +72,33 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
-        {/* Telegram */}
-        {telegramLoading ? (
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">Telegram Connection</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <Skeleton className="h-20 w-full" />
-            </CardContent>
-          </Card>
-        ) : (
-          <TelegramConnection
-            initialConnected={telegramConnected}
-            initialBotUsername={telegramBotUsername}
-          />
-        )}
+        {/* WhatsApp */}
+        <WhatsAppConnection
+          initialConnected={s?.whatsapp_connected ?? false}
+          initialPhoneNumberId={s?.whatsapp_display_phone ?? null}
+        />
 
-        {/* AI */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg">AI Behavior</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm text-muted-foreground">
-              Coming in Phase 4 — configure AI confidence thresholds and
-              auto-clarification settings.
-            </p>
-          </CardContent>
-        </Card>
+        {/* AI Behavior */}
+        <AIBehaviorSettings
+          initialConfidenceThreshold={s?.ai_confidence_threshold ?? 0.7}
+          initialAutoClarity={s?.ai_auto_clarify ?? true}
+          initialHandoffMessage={s?.ai_handoff_message ?? "A team member will assist you shortly."}
+          initialAutoAcknowledge={s?.ai_auto_acknowledge ?? false}
+          initialAcknowledgeTemplate={s?.ai_acknowledge_template ?? null}
+        />
+
+        {/* AI Persona */}
+        <AIPersonaSettings
+          initialPersonaName={s?.ai_persona_name ?? null}
+          initialTone={s?.ai_tone ?? "friendly"}
+          initialGreeting={s?.ai_greeting ?? null}
+          initialResponseLanguage={s?.ai_response_language ?? "auto"}
+          initialBusinessContext={s?.ai_business_context ?? null}
+          initialCustomInstructions={s?.ai_custom_instructions ?? null}
+        />
+
+        {/* Knowledge Base */}
+        <AIFAQSettings initialFaq={faqResult.data ?? []} />
 
         {/* Account */}
         <Card>
@@ -115,10 +106,7 @@ export default function SettingsPage() {
             <CardTitle className="text-lg">Account</CardTitle>
           </CardHeader>
           <CardContent>
-            <Button variant="outline" onClick={handleSignOut}>
-              <LogOut className="me-2 h-4 w-4" />
-              Sign Out
-            </Button>
+            <SignOutButton />
           </CardContent>
         </Card>
       </div>

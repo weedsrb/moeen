@@ -10,8 +10,8 @@ export default function OrdersPage() {
           <ClipboardList className="h-12 w-12 text-muted-foreground/50" />
           <h2 className="mt-4 text-lg font-medium">No orders yet</h2>
           <p className="mt-1 text-sm text-muted-foreground max-w-sm">
-            Orders will appear here when customers start messaging your
-            Telegram bot.
+            Orders will appear here when customers place orders through
+            WhatsApp. AI-extracted orders show up automatically.
           </p>
         </div>
       </div>

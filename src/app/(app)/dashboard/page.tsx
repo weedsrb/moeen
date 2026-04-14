@@ -1,7 +1,7 @@
 import { PageTransition } from "@/components/layout/page-transition";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { InventoryAlerts } from "@/components/dashboard/inventory-alerts";
-import { TelegramPrompt } from "@/components/dashboard/telegram-prompt";
+import { WhatsAppPrompt } from "@/components/dashboard/whatsapp-prompt";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import {
@@ -10,42 +10,12 @@ import {
   CheckCircle2,
   Truck,
   AlertTriangle,
+  MessageSquare,
+  Package,
+  PackageCheck,
 } from "lucide-react";
 import type { Product } from "@/types/product";
 import { getStockStatus } from "@/lib/utils/inventory";
-
-const kpiCards = [
-  {
-    title: "New Orders",
-    value: 0,
-    icon: ClipboardList,
-    color: "text-blue-500",
-  },
-  {
-    title: "Pending",
-    value: 0,
-    icon: Clock,
-    color: "text-amber-500",
-  },
-  {
-    title: "Confirmed",
-    value: 0,
-    icon: CheckCircle2,
-    color: "text-green-500",
-  },
-  {
-    title: "Out for Delivery",
-    value: 0,
-    icon: Truck,
-    color: "text-violet-500",
-  },
-  {
-    title: "Flagged",
-    value: 0,
-    icon: AlertTriangle,
-    color: "text-red-500",
-  },
-];
 
 export default async function DashboardPage() {
   const supabase = await createClient();
@@ -61,44 +31,130 @@ export default async function DashboardPage() {
     .eq("user_id", user.id)
     .single();
 
-  // Fetch products for inventory alerts
-  let outOfStock: Product[] = [];
-  let lowStock: Product[] = [];
-  let telegramConnected = false;
+  if (!merchant) redirect("/onboarding");
 
-  if (merchant) {
-    const { data: products } = await supabase
+  // Parallel fetch: products, settings, order counts, today's stats, flags
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayISO = today.toISOString();
+
+  const [
+    productsResult,
+    settingsResult,
+    incomingResult,
+    pendingResult,
+    confirmedResult,
+    deliveryResult,
+    flagsResult,
+    todayMessagesResult,
+    todayOrdersResult,
+    todayDeliveredResult,
+  ] = await Promise.all([
+    supabase
       .from("products")
       .select("*")
       .eq("merchant_id", merchant.id)
-      .eq("is_active", true);
-
-    const { data: settings } = await supabase
+      .eq("is_active", true),
+    supabase
       .from("merchant_settings")
-      .select("low_stock_threshold, telegram_connected")
+      .select("low_stock_threshold, whatsapp_connected")
       .eq("merchant_id", merchant.id)
-      .single();
+      .single(),
+    supabase
+      .from("orders")
+      .select("*", { count: "exact", head: true })
+      .eq("merchant_id", merchant.id)
+      .eq("status", "incoming"),
+    supabase
+      .from("orders")
+      .select("*", { count: "exact", head: true })
+      .eq("merchant_id", merchant.id)
+      .eq("status", "pending"),
+    supabase
+      .from("orders")
+      .select("*", { count: "exact", head: true })
+      .eq("merchant_id", merchant.id)
+      .eq("status", "confirmed"),
+    supabase
+      .from("orders")
+      .select("*", { count: "exact", head: true })
+      .eq("merchant_id", merchant.id)
+      .eq("status", "out_for_delivery"),
+    supabase
+      .from("flags")
+      .select("*", { count: "exact", head: true })
+      .eq("merchant_id", merchant.id)
+      .eq("is_resolved", false),
+    supabase
+      .from("messages")
+      .select("*", { count: "exact", head: true })
+      .eq("merchant_id", merchant.id)
+      .eq("direction", "inbound")
+      .gte("created_at", todayISO),
+    supabase
+      .from("orders")
+      .select("*", { count: "exact", head: true })
+      .eq("merchant_id", merchant.id)
+      .gte("created_at", todayISO),
+    supabase
+      .from("orders")
+      .select("*", { count: "exact", head: true })
+      .eq("merchant_id", merchant.id)
+      .eq("status", "delivered")
+      .gte("delivered_at", todayISO),
+  ]);
 
-    const threshold = settings?.low_stock_threshold ?? 5;
-    telegramConnected = settings?.telegram_connected ?? false;
+  const threshold = settingsResult.data?.low_stock_threshold ?? 5;
+  const whatsappConnected = settingsResult.data?.whatsapp_connected ?? false;
+  const products = productsResult.data ?? [];
 
-    if (products) {
-      outOfStock = products.filter(
-        (p: Product) => getStockStatus(p, threshold) === "out_of_stock"
-      );
-      lowStock = products.filter(
-        (p: Product) => getStockStatus(p, threshold) === "low_stock"
-      );
-    }
-  }
+  const outOfStock = products.filter(
+    (p: Product) => getStockStatus(p, threshold) === "out_of_stock"
+  );
+  const lowStock = products.filter(
+    (p: Product) => getStockStatus(p, threshold) === "low_stock"
+  );
+
+  const kpiCards = [
+    {
+      title: "New Orders",
+      value: incomingResult.count ?? 0,
+      icon: ClipboardList,
+      color: "text-blue-500",
+    },
+    {
+      title: "Pending",
+      value: pendingResult.count ?? 0,
+      icon: Clock,
+      color: "text-amber-500",
+    },
+    {
+      title: "Confirmed",
+      value: confirmedResult.count ?? 0,
+      icon: CheckCircle2,
+      color: "text-green-500",
+    },
+    {
+      title: "Out for Delivery",
+      value: deliveryResult.count ?? 0,
+      icon: Truck,
+      color: "text-violet-500",
+    },
+    {
+      title: "Flagged",
+      value: flagsResult.count ?? 0,
+      icon: AlertTriangle,
+      color: "text-red-500",
+    },
+  ];
 
   return (
     <PageTransition>
       <div className="space-y-6">
         <h1 className="text-2xl font-semibold">Dashboard</h1>
 
-        {/* Telegram setup prompt */}
-        {!telegramConnected && <TelegramPrompt />}
+        {/* WhatsApp setup prompt */}
+        {!whatsappConnected && <WhatsAppPrompt />}
 
         {/* KPI Cards */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
@@ -120,18 +176,6 @@ export default async function DashboardPage() {
           })}
         </div>
 
-        {/* Quick Actions */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg">Quick Actions</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm text-muted-foreground">
-              No items need attention right now.
-            </p>
-          </CardContent>
-        </Card>
-
         {/* Inventory Alerts */}
         <InventoryAlerts outOfStock={outOfStock} lowStock={lowStock} />
 
@@ -143,15 +187,30 @@ export default async function DashboardPage() {
           <CardContent>
             <div className="grid grid-cols-3 gap-4 text-center">
               <div>
-                <p className="text-2xl font-bold font-mono">0</p>
+                <div className="flex items-center justify-center gap-1.5">
+                  <MessageSquare className="h-4 w-4 text-blue-500" />
+                  <p className="text-2xl font-bold font-mono">
+                    {todayMessagesResult.count ?? 0}
+                  </p>
+                </div>
                 <p className="text-xs text-muted-foreground">Messages</p>
               </div>
               <div>
-                <p className="text-2xl font-bold font-mono">0</p>
+                <div className="flex items-center justify-center gap-1.5">
+                  <Package className="h-4 w-4 text-amber-500" />
+                  <p className="text-2xl font-bold font-mono">
+                    {todayOrdersResult.count ?? 0}
+                  </p>
+                </div>
                 <p className="text-xs text-muted-foreground">Orders</p>
               </div>
               <div>
-                <p className="text-2xl font-bold font-mono">0</p>
+                <div className="flex items-center justify-center gap-1.5">
+                  <PackageCheck className="h-4 w-4 text-green-500" />
+                  <p className="text-2xl font-bold font-mono">
+                    {todayDeliveredResult.count ?? 0}
+                  </p>
+                </div>
                 <p className="text-xs text-muted-foreground">Delivered</p>
               </div>
             </div>
