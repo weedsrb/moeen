@@ -1,12 +1,12 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { useRealtimeConversations } from "@/hooks/use-realtime-conversations";
 import {
   ConversationList,
   type ConversationWithCustomer,
 } from "./conversation-list";
-import { ChatThread } from "@/components/chat/chat-thread";
+import { ChatThread, type ChatSendRef } from "@/components/chat/chat-thread";
 import { ReplyInput } from "@/components/chat/reply-input";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft } from "lucide-react";
@@ -27,6 +27,7 @@ export function ConversationsContent({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mobileShowChat, setMobileShowChat] = useState(false);
 
+  const sendRef = useRef<ChatSendRef | null>(null);
   const selected = conversations.find((c) => c.id === selectedId) ?? null;
 
   const handleConversationUpdate = useCallback(
@@ -69,7 +70,7 @@ export function ConversationsContent({
   const customerName = selected?.customers?.name ?? "Unknown";
 
   return (
-    <div className="flex h-[calc(100vh-8rem)] sm:h-[calc(100vh-5rem)] rounded-lg border border-border overflow-hidden bg-card">
+    <div className="flex flex-1 min-h-0 rounded-lg border border-border overflow-hidden bg-card">
       {/* Conversation List — left panel */}
       <div
         className={cn(
@@ -113,15 +114,17 @@ export function ConversationsContent({
               </div>
               <div>
                 <p className="text-sm font-medium">{customerName}</p>
-                <p className="text-[10px] text-muted-foreground">Telegram</p>
+                <p className="text-[10px] text-muted-foreground">
+                  {selected.platform === "whatsapp" ? "WhatsApp" : selected.platform}
+                </p>
               </div>
             </div>
 
             {/* Messages */}
-            <ChatThread conversationId={selected.id} />
+            <ChatThread conversationId={selected.id} onSendRef={sendRef} />
 
             {/* Reply */}
-            <ReplyInput conversationId={selected.id} />
+            <ReplyInput conversationId={selected.id} onSendRef={sendRef} />
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center">

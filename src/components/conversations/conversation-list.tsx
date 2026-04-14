@@ -61,7 +61,7 @@ export function ConversationList({
       <div className="flex flex-col items-center justify-center h-full p-6 text-center">
         <MessageSquare className="h-10 w-10 text-muted-foreground/50 mb-3" />
         <p className="text-sm text-muted-foreground">
-          No conversations yet. Messages from your Telegram bot will appear
+          No conversations yet. Messages from your WhatsApp number will appear
           here.
         </p>
       </div>

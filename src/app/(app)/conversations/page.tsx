@@ -28,9 +28,9 @@ export default async function ConversationsPage() {
     .order("last_message_at", { ascending: false, nullsFirst: false });
 
   return (
-    <PageTransition>
-      <div className="space-y-4">
-        <h1 className="text-2xl font-semibold">Messages</h1>
+    <PageTransition className="flex flex-col overflow-y-hidden overflow-x-visible">
+      <div className="flex flex-col flex-1 min-h-0 gap-4">
+        <h1 className="text-2xl font-semibold shrink-0">Messages</h1>
         <ConversationsContent
           initialConversations={
             (conversations as ConversationWithCustomer[]) ?? []

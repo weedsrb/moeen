@@ -5,6 +5,9 @@ import { usePathname, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { useMerchant } from "@/components/layout/merchant-provider";
+import { useUnreadCount } from "@/hooks/use-unread-count";
 import {
   LayoutDashboard,
   MessageSquare,
@@ -28,6 +31,8 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const supabase = createClient();
+  const { id: merchantId } = useMerchant();
+  const unreadCount = useUnreadCount(merchantId);
 
   async function handleSignOut() {
     await supabase.auth.signOut();
@@ -62,6 +67,14 @@ export function Sidebar() {
             >
               <Icon className="h-5 w-5 shrink-0" />
               <span className="hidden lg:block">{item.label}</span>
+              {item.href === "/conversations" && unreadCount > 0 && (
+                <Badge
+                  variant="default"
+                  className="h-5 min-w-5 flex items-center justify-center px-1.5 text-[10px] ms-auto"
+                >
+                  {unreadCount > 99 ? "99+" : unreadCount}
+                </Badge>
+              )}
             </Link>
           );
         })}

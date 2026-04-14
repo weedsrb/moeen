@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { useMerchant } from "@/components/layout/merchant-provider";
+import { useUnreadCount } from "@/hooks/use-unread-count";
 import {
   LayoutDashboard,
   MessageSquare,
@@ -23,6 +25,8 @@ const navItems = [
 
 export function MobileNav() {
   const pathname = usePathname();
+  const { id: merchantId } = useMerchant();
+  const unreadCount = useUnreadCount(merchantId);
 
   return (
     <nav className="sm:hidden fixed bottom-0 inset-x-0 z-50 bg-card border-t border-border pb-[env(safe-area-inset-bottom)]">
@@ -30,6 +34,7 @@ export function MobileNav() {
         {navItems.map((item) => {
           const isActive = pathname === item.href;
           const Icon = item.icon;
+          const isMessages = item.href === "/conversations";
 
           return (
             <Link
@@ -42,7 +47,14 @@ export function MobileNav() {
                   : "text-muted-foreground"
               )}
             >
-              <Icon className="h-5 w-5" />
+              <div className="relative">
+                <Icon className="h-5 w-5" />
+                {isMessages && unreadCount > 0 && (
+                  <span className="absolute -top-1 -end-1 h-4 min-w-4 flex items-center justify-center rounded-full bg-primary text-primary-foreground text-[9px] px-1">
+                    {unreadCount > 99 ? "99+" : unreadCount}
+                  </span>
+                )}
+              </div>
               <span>{item.label}</span>
             </Link>
           );

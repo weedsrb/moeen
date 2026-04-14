@@ -4,13 +4,15 @@ import { useState, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { SendHorizontal, Loader2 } from "lucide-react";
+import type { ChatSendRef } from "./chat-thread";
 
 interface ReplyInputProps {
   conversationId: string;
   disabled?: boolean;
+  onSendRef?: React.MutableRefObject<ChatSendRef | null>;
 }
 
-export function ReplyInput({ conversationId, disabled }: ReplyInputProps) {
+export function ReplyInput({ conversationId, disabled, onSendRef }: ReplyInputProps) {
   const [content, setContent] = useState("");
   const [sending, setSending] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -19,8 +21,15 @@ export function ReplyInput({ conversationId, disabled }: ReplyInputProps) {
     const text = content.trim();
     if (!text || sending) return;
 
-    setSending(true);
+    // Optimistic: show message immediately and clear input
+    onSendRef?.current?.addOptimistic(text);
+    setContent("");
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "auto";
+    }
 
+    // Fire API in background
+    setSending(true);
     try {
       const res = await fetch("/api/messages/send", {
         method: "POST",
@@ -28,15 +37,11 @@ export function ReplyInput({ conversationId, disabled }: ReplyInputProps) {
         body: JSON.stringify({ conversationId, content: text }),
       });
 
-      if (res.ok) {
-        setContent("");
-        // Reset textarea height
-        if (textareaRef.current) {
-          textareaRef.current.style.height = "auto";
-        }
+      if (!res.ok) {
+        onSendRef?.current?.markFailed(text);
       }
     } catch {
-      // Ignore — message will not appear in thread, user can retry
+      onSendRef?.current?.markFailed(text);
     } finally {
       setSending(false);
     }

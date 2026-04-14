@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { TelegramProvider } from "@/lib/messaging/telegram";
-import { sendMessageSchema } from "@/lib/validations/telegram";
+import { WhatsAppProvider } from "@/lib/messaging/whatsapp";
+import { sendMessageSchema } from "@/lib/validations/messaging";
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
@@ -48,22 +48,38 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Get bot token
-  const { data: settings } = await supabase
-    .from("merchant_settings")
-    .select("telegram_bot_token, telegram_connected")
-    .eq("merchant_id", merchant.id)
-    .single();
-
-  if (!settings?.telegram_connected || !settings.telegram_bot_token) {
+  if (conversation.platform !== "whatsapp") {
     return NextResponse.json(
-      { error: "Telegram bot not connected" },
+      { error: "Only WhatsApp conversations are supported" },
       { status: 400 }
     );
   }
 
-  // Send via Telegram
-  const provider = new TelegramProvider(settings.telegram_bot_token);
+  // Get WhatsApp credentials
+  const { data: settings } = await supabase
+    .from("merchant_settings")
+    .select(
+      "whatsapp_phone_number_id, whatsapp_access_token, whatsapp_connected"
+    )
+    .eq("merchant_id", merchant.id)
+    .single();
+
+  if (
+    !settings?.whatsapp_connected ||
+    !settings.whatsapp_phone_number_id ||
+    !settings.whatsapp_access_token
+  ) {
+    return NextResponse.json(
+      { error: "WhatsApp not connected" },
+      { status: 400 }
+    );
+  }
+
+  // Send via WhatsApp
+  const provider = new WhatsAppProvider(
+    settings.whatsapp_phone_number_id,
+    settings.whatsapp_access_token
+  );
   const result = await provider.sendMessage(
     conversation.platform_chat_id,
     parsed.data.content
