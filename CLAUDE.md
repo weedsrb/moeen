@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Mo'een (معين — "the one who helps") is an order management SaaS platform for Palestinian/MENA small businesses. It intercepts customer messages on Telegram/WhatsApp, uses AI to extract structured orders, and presents them in a merchant dashboard.
+Mo'een (معين — "the one who helps") is an order management SaaS platform for Palestinian/MENA small businesses. It intercepts customer messages on WhatsApp, uses AI to extract structured orders, and presents them in a merchant dashboard.
 
 ## Documentation
 
@@ -41,7 +41,7 @@ GEMINI_API_KEY=
 NEXT_PUBLIC_APP_URL=   # Your deployment URL or ngrok URL for local dev
 ```
 
-Bot tokens are stored per-merchant in `merchant_settings.telegram_bot_token`, not in env vars.
+WhatsApp credentials (phone number ID, access token, verify token) are stored per-merchant in `merchant_settings`, not in env vars.
 
 ## Tech Stack
 
@@ -53,14 +53,16 @@ Bot tokens are stored per-merchant in `merchant_settings.telegram_bot_token`, no
 | Database | Supabase (PostgreSQL + Auth + Realtime + Storage) |
 | AI | Google Gemini 2.5 Flash |
 | Automation | n8n Cloud |
-| Messaging | Telegram Bot API (MVP), WhatsApp (Phase 2) |
+| Messaging | WhatsApp Cloud API (Meta Graph API v21.0) |
 | Deployment | Vercel (frontend) + Supabase Cloud |
 
 ## Architecture
 
 Three-layer system: **Next.js frontend** → **Next.js API routes** → **Supabase + n8n + Gemini**
 
-Critical message flow: Customer sends Telegram message → webhook at `/api/webhooks/telegram/[merchantId]` → find/create customer + conversation → save message → Supabase Realtime push → Dashboard updates live
+Critical message flow: Customer sends WhatsApp message → Meta POSTs to `/api/webhooks/whatsapp/[merchantId]` → find/create customer + conversation → save message → Supabase Realtime push → Dashboard updates live → AI pipeline runs in background via `after()` callback
+
+AI pipeline flow: RegEx pre-filter (Arabic/English/Arabizi patterns) → context assembly (last 6 messages + product catalog + merchant settings + FAQ) → Gemini 2.5 Flash (structured JSON extraction) → decision tree (auto-create order / ask clarification / flag for human)
 
 **Key architectural rules:**
 - The app NEVER calls Telegram/WhatsApp APIs directly — always through the `MessagingProvider` interface in `src/lib/messaging/`
@@ -78,7 +80,7 @@ Critical message flow: Customer sends Telegram message → webhook at `/api/webh
 **Public API paths (exempt from auth middleware):**
 - `/api/auth/` — OAuth callback
 - `/api/waitlist` — landing page signup
-- `/api/webhooks/` — Telegram webhook receiver (no user session, uses secret token verification)
+- `/api/webhooks/` — WhatsApp webhook receiver (no user session, uses verify_token for GET challenge + merchantId in path)
 
 ## Git Workflow
 
@@ -131,7 +133,9 @@ Multi-tenant via shared PostgreSQL with Row Level Security (RLS). Every table ha
 
 Core tables: `merchants`, `merchant_settings`, `customers`, `conversations`, `messages`, `products`, `orders`, `order_items`, `order_timeline`, `flags`, `stock_adjustments`
 
-`merchant_settings` key columns: `telegram_bot_token`, `telegram_connected`, `telegram_bot_username`, `telegram_webhook_secret`, `ai_confidence_threshold`, `ai_auto_clarify`, `low_stock_threshold`
+Core tables: `merchant_faq` (AI knowledge base Q&A pairs per merchant)
+
+`merchant_settings` key columns: `whatsapp_phone_number_id`, `whatsapp_access_token`, `whatsapp_verify_token`, `whatsapp_business_account_id`, `whatsapp_display_phone`, `whatsapp_connected`, `ai_confidence_threshold`, `ai_auto_clarify`, `ai_handoff_message`, `ai_persona_name`, `ai_tone`, `ai_greeting`, `ai_business_context`, `ai_custom_instructions`, `ai_response_language`, `ai_auto_acknowledge`, `ai_acknowledge_template`, `low_stock_threshold`
 
 ## Key Principles
 
@@ -140,7 +144,7 @@ Core tables: `merchants`, `merchant_settings`, `customers`, `conversations`, `me
 - AI suggests, merchant decides — confidence thresholds determine auto-create vs. flag for human
 - Messages are never lost — always saved to Supabase before any processing
 - CSS logical properties for RTL support
-- Webhook handlers always return 200 OK to Telegram (wrap in try/catch to prevent retry storms)
+- Webhook handlers always return 200 OK to Meta (wrap in try/catch to prevent retry storms)
 - Idempotency via `platform_message_id` — check before inserting any inbound message
 
 ## Implementation Status
@@ -151,8 +155,8 @@ Core tables: `merchants`, `merchant_settings`, `customers`, `conversations`, `me
 | 0.5 — Landing Page | ✅ Complete | GSAP animations, all sections, chaos→clarity hero |
 | 1 — Foundation | ✅ Complete | Auth, DB schema, app shell, onboarding, page shells |
 | 2 — Catalog & Inventory | ✅ Complete | Product CRUD, image upload, inventory page, stock adjustments, dashboard alerts |
-| 3 — Telegram Integration | ✅ Complete | Bot connection, webhook receiver, real-time conversations, send/receive messages |
-| 4 — AI Pipeline | ⬜ Not started | |
+| 3 — WhatsApp Integration | ✅ Complete | WhatsApp Cloud API connection, webhook receiver, real-time conversations, send/receive messages, unread badges |
+| 4 — AI Pipeline | ✅ Complete | Gemini 2.5 Flash, regex pre-filter, order extraction, confidence-based decisions, AI settings UI, FAQ knowledge base |
 | 5 — Order Management | ⬜ Not started | |
 | 6 — Automation (n8n) | ⬜ Not started | |
 
@@ -230,68 +234,129 @@ Core tables: `merchants`, `merchant_settings`, `customers`, `conversations`, `me
 - Stock adjustments create audit trail in `stock_adjustments` table
 - Base-ui Select `onValueChange` passes `string | null` — always guard with `(v) => v && handler(v)`
 
-## Phase 3 — What Was Built
+## Phase 3 — What Was Built (WhatsApp Cloud API)
 
-**Database Migration:**
-- `supabase/migrations/004_telegram_webhook.sql` — adds `telegram_bot_username`, `telegram_webhook_secret` to `merchant_settings`; indexes on `conversations(merchant_id, last_message_at DESC)` and `messages(platform_message_id)`
+**Database Migrations:**
+- `supabase/migrations/004_telegram_webhook.sql` — indexes on `conversations(merchant_id, last_message_at DESC)` and `messages(platform_message_id)` (originally for Telegram, indexes reused)
+- `supabase/migrations/005_whatsapp_migration.sql` — drops Telegram columns, adds WhatsApp columns: `whatsapp_phone_number_id`, `whatsapp_access_token`, `whatsapp_verify_token`, `whatsapp_business_account_id`, `whatsapp_display_phone`, `whatsapp_connected` to `merchant_settings`
 
 **Types & Validation:**
-- `src/types/telegram.ts` — `TelegramUpdate`, `TelegramMessage`, `TelegramUser`, `TelegramChat`, `TelegramBotInfo` types
-- `src/lib/validations/telegram.ts` — `connectTelegramSchema` (token regex), `sendMessageSchema`
-- `src/types/merchant.ts` — extended with `telegram_bot_username`, `telegram_webhook_secret` fields
+- `src/types/whatsapp.ts` — `WhatsAppWebhookPayload`, `WhatsAppMessage`, `WhatsAppMedia`, `WhatsAppContact`, `WhatsAppStatus`, `WhatsAppSendResponse`, `WhatsAppErrorResponse` types
+- `src/lib/validations/whatsapp.ts` — `connectWhatsAppSchema` (phoneNumberId, accessToken, verifyToken, businessAccountId)
+- `src/lib/validations/messaging.ts` — shared `sendMessageSchema` (conversationId, content) used by send API route
+- `src/types/merchant.ts` — `MerchantSettings` has WhatsApp fields: `whatsapp_phone_number_id`, `whatsapp_access_token`, `whatsapp_verify_token`, `whatsapp_business_account_id`, `whatsapp_display_phone`, `whatsapp_connected`
 
 **Messaging Layer:**
-- `src/lib/messaging/interface.ts` — `MessagingProvider` interface (already existed), `ParsedMessage`, `MessageResult` types
-- `src/lib/messaging/telegram.ts` — `TelegramProvider` class implementing `MessagingProvider`; static helpers: `verifyToken()`, `setWebhook()`, `deleteWebhook()`
+- `src/lib/messaging/interface.ts` — `MessagingProvider` interface, `ParsedMessage`, `MessageResult` types
+- `src/lib/messaging/whatsapp.ts` — `WhatsAppProvider` implementing `MessagingProvider`; methods: `sendMessage()`, `sendTemplateMessage()`, `receiveWebhook()`, `getConversationHistory()`; static: `verifyCredentials()` (calls Meta Graph API to validate phone number ID + token)
 
 **API Routes:**
-- `src/app/api/telegram/connect/route.ts` — POST (verify token, register webhook, save to DB) + DELETE (remove webhook, clear token)
-- `src/app/api/webhooks/telegram/[merchantId]/route.ts` — POST webhook receiver: secret verification, idempotency check, find/create customer+conversation, save message, update conversation metadata
+- `src/app/api/whatsapp/connect/route.ts` — POST (calls `verifyCredentials()`, saves phone number ID/token/verify token/display phone to DB) + DELETE (clears all whatsapp fields)
+- `src/app/api/webhooks/whatsapp/[merchantId]/route.ts` — GET (verify_token challenge for Meta webhook setup), POST (inbound message processing: idempotency check, customer upsert, conversation find/create, message insert, conversation metadata update). Always returns 200 to Meta.
 - `src/app/api/messages/route.ts` — GET messages for a conversation (resets unread count)
-- `src/app/api/messages/send/route.ts` — POST send merchant reply via Telegram + save to DB
+- `src/app/api/messages/send/route.ts` — POST send merchant reply via `WhatsAppProvider` + save to DB; checks `conversation.platform === "whatsapp"` before sending
 
 **Realtime Hooks:**
 - `src/hooks/use-realtime-conversations.ts` — Supabase Realtime subscription on `conversations` table
 - `src/hooks/use-realtime-messages.ts` — Supabase Realtime subscription on `messages` table
+- `src/hooks/use-unread-count.ts` — fetches total unread count across all conversations, subscribes to realtime updates; used by sidebar and mobile nav for badge display
 
 **Chat Components** (`src/components/chat/`):
 - `message-bubble.tsx` — styled by sender type (customer=blue, merchant=gray, AI=violet, system=centered)
-- `chat-thread.tsx` — scrollable message list with date separators, auto-scroll, realtime updates
-- `reply-input.tsx` — auto-growing textarea, Enter to send, POSTs to `/api/messages/send`
+- `chat-thread.tsx` — scrollable message list with date separators, auto-scroll, realtime updates; exports `ChatSendRef` interface with `addOptimistic(content)` and `markFailed(content)` methods; renders failed messages with red tint + "Failed to send. Tap to retry" retry button
+- `reply-input.tsx` — auto-growing textarea, Enter to send; uses `ChatSendRef` for optimistic sends (clears input + shows message instantly before API responds); calls `markFailed()` on API error
 
 **Conversations Components** (`src/components/conversations/`):
 - `conversation-list.tsx` — searchable list sorted by `last_message_at`, unread badge, customer initials avatar
-- `conversations-content.tsx` — two-panel layout (list + chat), mobile toggle, realtime conversation updates
+- `conversations-content.tsx` — two-panel layout (list + chat), mobile toggle, realtime conversation updates; holds `sendRef = useRef<ChatSendRef | null>(null)` passed to both `ChatThread` and `ReplyInput`
 
 **Settings Components:**
-- `src/components/settings/telegram-connection.tsx` — bot connection form with BotFather instructions, token input, connected state with disconnect option
+- `src/components/settings/whatsapp-connection.tsx` — connected/disconnected states; form for phoneNumberId/accessToken/verifyToken/businessAccountId; uses controlled `open` state for disconnect dialog (no `DialogTrigger` wrapping `Button`)
 
 **Dashboard:**
-- `src/components/dashboard/telegram-prompt.tsx` — dismissible banner shown when `telegram_connected = false`
+- `src/components/dashboard/whatsapp-prompt.tsx` — dismissible green banner linking to `/settings`, shown when `whatsapp_connected = false`
 
 **Pages:**
-- `src/app/(app)/conversations/page.tsx` — server component fetching conversations with customer names
-- `src/app/(app)/settings/page.tsx` — updated with `TelegramConnection` component (fetches telegram status on mount)
-- `src/app/(app)/dashboard/page.tsx` — updated with `TelegramPrompt` banner
+- `src/app/(app)/conversations/page.tsx` — server component fetching conversations with customer names; uses `flex flex-col flex-1 min-h-0` for proper card-contained scrolling
+- `src/app/(app)/settings/page.tsx` — client component fetching `whatsapp_connected, whatsapp_display_phone` on mount, renders `WhatsAppConnection`
+- `src/app/(app)/dashboard/page.tsx` — server component with `WhatsAppPrompt` banner
 
 **Navigation:**
-- `src/components/layout/sidebar.tsx` — added Messages (`/conversations`) nav item
-- `src/components/layout/mobile-nav.tsx` — added Messages nav item
+- `src/components/layout/sidebar.tsx` — Messages nav item with unread count badge via `useUnreadCount(merchantId)`
+- `src/components/layout/mobile-nav.tsx` — Messages nav item with overlay badge using `-end-1` (logical property)
+
+**Layout Fix:**
+- `src/app/(app)/layout.tsx` — `<main>` uses `flex-1 flex flex-col overflow-hidden` to enable card-contained scrolling
+- `src/components/layout/page-transition.tsx` — adds `flex-1 min-h-0 overflow-auto` by default (merged via `cn()`)
 
 **Key patterns established in Phase 3:**
-- Webhook URL includes `merchantId` in path — no token scanning per request
-- Webhook secret (`x-telegram-bot-api-secret-token` header) verified on every inbound request
+- Webhook URL: `{NEXT_PUBLIC_APP_URL}/api/webhooks/whatsapp/{merchantId}` — merchantId (UUID) in path
+- Webhook GET: Meta sends `hub.mode=subscribe` + `hub.verify_token` + `hub.challenge` — compare against stored `whatsapp_verify_token`, return challenge
+- Webhook POST: No programmatic registration — merchant configures URL + verify token manually in Meta Console
 - Idempotency via `platform_message_id` — checked before inserting any message
-- Always return 200 OK to Telegram regardless of processing errors (prevent retry storms)
-- Settings page stays as client component, fetches telegram status on mount via `supabase.from('merchant_settings')`
+- Always return 200 OK to Meta regardless of processing errors (prevent retry storms)
+- Optimistic sends: `ChatSendRef` connects `ChatThread` and `ReplyInput` without prop drilling through parent
+- Failed sends: `markFailed(content)` finds the optimistic message by content and sets `failed: true`; clicking retries
+- WhatsApp test number limitation: Meta sandbox only sends to pre-registered test recipients; replies to non-test numbers fail with 400 from Meta
 - `ConversationWithCustomer` type extends `Conversation` with joined `customers` data
+
+## Phase 4 — What Was Built (AI Pipeline)
+
+**Database Migrations:**
+- `supabase/migrations/006_ai_settings.sql` — adds AI persona columns to `merchant_settings` (`ai_persona_name`, `ai_tone`, `ai_greeting`, `ai_business_context`, `ai_custom_instructions`, `ai_response_language`, `ai_auto_acknowledge`, `ai_acknowledge_template`); creates `merchant_faq` table (id, merchant_id, question, answer, display_order) with RLS
+
+**AI Core Library** (`src/lib/ai/`):
+- `types.ts` — `GeminiResponse`, `GeminiItem`, `PipelineInput`, `CompressedProduct`, `AssembledContext` types; `geminiResponseSchema` Zod schema for runtime validation of Gemini output
+- `regex-filter.ts` — `shouldProcess()` pre-filter with Arabic (بدي, عايز, طلب), English (order, want, buy), and Arabizi (bidi, atlobi) patterns; bypasses greetings/thanks/emojis; always processes replies to AI messages and bare numbers
+- `context.ts` — `assembleContext()` fetches last 6 messages, active products (auto-limited to ~50), merchant AI settings, business name, FAQ; `buildMerchantContext()` constructs system prompt with persona/tone/greeting/language/FAQ/custom instructions
+- `gemini.ts` — `callGemini()` calls Gemini 2.5 Flash with temperature 0.1, thinking budget 1024 tokens, JSON response mode; includes JSON repair for truncated responses (unclosed strings/brackets)
+- `process.ts` — `processInboundMessage()` main orchestrator: RegEx → context → Gemini (with 1 retry) → save AI result → decision tree. Decision tree: intent "other" → no action; "question" → send AI answer or flag; "order" + high confidence + complete → auto-create; + missing fields + auto-clarify → send clarification; + missing + no auto-clarify → create + flag; low confidence → create + flag + handoff message
+- `order-creator.ts` — `createOrderFromAI()` atomically creates order (MO-000001 format) + order_items + timeline entry with AI confidence metadata
+
+**API Routes:**
+- `src/app/api/ai/process/route.ts` — POST manual reprocessing of a specific message (auth required, resets AI fields before re-running pipeline)
+- `src/app/api/settings/ai/route.ts` — GET/PATCH merchant AI settings (threshold, auto-clarify, handoff, persona, tone, greeting, language, auto-acknowledge)
+- `src/app/api/settings/ai/faq/route.ts` — GET/POST FAQ entries for merchant
+- `src/app/api/settings/ai/faq/[id]/route.ts` — PATCH/DELETE individual FAQ entries with ownership verification
+
+**Settings Components** (`src/components/settings/`):
+- `ai-behavior-settings.tsx` — confidence threshold slider (30-95% with color zones: red <60%, amber 60-80%, green >80%), auto-clarify toggle, handoff message, auto-acknowledge toggle + template
+- `ai-persona-settings.tsx` — assistant name, tone selector (friendly/formal/casual), greeting, response language (auto/Arabic/English), business context (1000 chars), custom instructions (1000 chars)
+- `ai-faq-settings.tsx` — knowledge base manager: add/edit/delete Q&A pairs, pending entries editable, saved entries read-only
+
+**Validation:**
+- `src/lib/validations/ai-settings.ts` — `updateAISettingsSchema` (all AI settings fields), `createFAQSchema`, `updateFAQSchema`
+
+**Webhook Integration:**
+- `src/app/api/webhooks/whatsapp/[merchantId]/route.ts` — updated POST handler: auto-acknowledge (instant reply before AI), then `processInboundMessage()` runs in background via `after()` callback; only processes text messages with content
+
+**Pages:**
+- `src/app/(app)/settings/page.tsx` — server component fetching AI settings + FAQ in parallel, renders AIBehaviorSettings + AIPersonaSettings + AIFAQSettings sections
+- `src/app/(app)/flags/page.tsx` — displays AI-generated flags (ai_low_confidence, ai_unavailable, customer_waiting) grouped by priority with resolution actions
+
+**Key patterns established in Phase 4:**
+- Two-stage filtering: cheap RegEx first (Arabic/English/Arabizi), expensive Gemini only when order signal detected
+- Reply-to-AI detection: checks `last_outbound_sender_type` to always process customer replies to AI messages
+- Auto-acknowledge fires before AI processing (instant customer response, fire-and-forget)
+- `after()` callback keeps webhook response fast (returns 200 to Meta immediately, AI runs in background)
+- Gemini gets full merchant context: persona, tone, greeting, language, FAQ, custom instructions, business description
+- Confidence-based decision tree: 4 distinct paths for order handling
+- AI messages sent via WhatsApp with `sender_type: "ai"` — rendered with violet styling in chat
+- Graceful degradation: Gemini failures create `ai_unavailable` flags instead of crashing
+- Atomic order creation: order + items + timeline created together with `ai_confidence` and `ai_extracted` metadata
+
+## Testing
+
+**No automated test suite exists.** Testing is manual. A comprehensive verification test plan covering 7 test groups (Connection, Webhook, Receiving, Sending, Realtime, UI/Layout, Dashboard) is documented in the plan file at `/Users/waleedsrb/.claude/plans/elegant-pondering-coral.md`.
+
+To verify code quality: `npm run typecheck && npm run build`
 
 ## shadcn/ui Note
 
 This project uses **base-ui** backed shadcn components (not Radix). Key differences:
 - `DropdownMenuTrigger`, `TooltipTrigger`, `SheetTrigger`, `DialogTrigger` do NOT support `asChild` prop
-- Put content directly inside the trigger element, or wrap with a plain `<a>` or `<Link>` outside the Button
-- Zod v4 uses `.issues` not `.errors` on `ZodError`
+- For dialogs triggered by a `<Button>`: use controlled `open` state (`const [open, setOpen] = useState(false)`) — put `onClick={() => setOpen(true)}` on the Button, pass `open={open} onOpenChange={setOpen}` to `<Dialog>`. Do NOT wrap `<Button>` inside `<DialogTrigger>` — this creates nested `<button>` elements and a React hydration error.
+- Zod v4: import from `"zod/v4"` (not `"zod"`), uses `.issues` not `.errors` on `ZodError`
 - Select `onValueChange` passes `string | null` — always null-guard: `(v) => v && handler(v)`
 
 **Installed components:** button, input, label, card, separator, select, avatar, dropdown-menu, tooltip, dialog, sheet, table, badge, textarea, tabs, skeleton, switch
@@ -304,7 +369,15 @@ Always check after implementation:
 3. **Supabase settings** — enable providers, Storage buckets, Realtime, Webhooks as needed
 
 **Phase 3 setup checklist:**
-- Run `supabase/migrations/004_telegram_webhook.sql` in Supabase SQL Editor
+- Run `supabase/migrations/004_telegram_webhook.sql` in Supabase SQL Editor (indexes only)
+- Run `supabase/migrations/005_whatsapp_migration.sql` in Supabase SQL Editor (drops Telegram columns, adds WhatsApp columns)
 - Add `NEXT_PUBLIC_APP_URL` to `.env.local` (ngrok URL for local dev, Vercel URL for prod)
 - Enable Supabase Realtime for `conversations` and `messages` tables (Dashboard → Database → Replication)
 - For local dev: run `ngrok http 3000` and use the ngrok URL as `NEXT_PUBLIC_APP_URL`
+- In Meta Console → App → WhatsApp → Configuration: set webhook URL to `{NEXT_PUBLIC_APP_URL}/api/webhooks/whatsapp/{merchantId}` and verify token to your chosen string
+- Subscribe to `messages` webhook field in Meta Console
+
+**Phase 4 setup checklist:**
+- Run `supabase/migrations/006_ai_settings.sql` in Supabase SQL Editor (AI persona columns + merchant_faq table)
+- Add `GEMINI_API_KEY` to `.env.local` (Google AI Studio API key)
+- AI settings are configurable per-merchant in Settings page (no env vars needed for AI behavior)
