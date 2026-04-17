@@ -15,6 +15,7 @@ const nextConfig: NextConfig = {
   // Re-enable there.
   experimental: {
     staleTimes: { dynamic: 30, static: 300 },
+    optimizePackageImports: ["lucide-react", "@base-ui/react", "framer-motion"],
   },
   images: {
     remotePatterns: supabaseHost
