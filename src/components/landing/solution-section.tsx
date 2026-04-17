@@ -1,14 +1,12 @@
 "use client";
 
 import { useRef, useEffect } from "react";
-import { gsap } from "gsap";
-import { ScrollTrigger } from "gsap/ScrollTrigger";
+import type { gsap } from "gsap";
+import { loadGsap } from "@/lib/animations/gsap";
 import { ArrowRight } from "lucide-react";
 import { solutions } from "@/lib/landing-data";
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
 import { SectionWrapper } from "./section-wrapper";
-
-gsap.registerPlugin(ScrollTrigger);
 
 export function SolutionSection() {
   const pairsRef = useRef<HTMLDivElement>(null);
@@ -17,45 +15,53 @@ export function SolutionSection() {
   useEffect(() => {
     if (prefersReducedMotion || !pairsRef.current) return;
 
-    const pairs = pairsRef.current.querySelectorAll("[data-solution-pair]");
+    let cancelled = false;
+    let ctx: gsap.Context | undefined;
 
-    const ctx = gsap.context(() => {
-      pairs.forEach((pair) => {
-        const left = pair.querySelector("[data-problem-side]");
-        const right = pair.querySelector("[data-solution-side]");
+    loadGsap().then(({ gsap }) => {
+      if (cancelled || !pairsRef.current) return;
+      const pairs = pairsRef.current.querySelectorAll("[data-solution-pair]");
+      ctx = gsap.context(() => {
+        pairs.forEach((pair) => {
+          const left = pair.querySelector("[data-problem-side]");
+          const right = pair.querySelector("[data-solution-side]");
 
-        const tl = gsap.timeline({
-          scrollTrigger: {
-            trigger: pair,
-            start: "top 85%",
-            once: true,
-          },
-        });
-
-        if (left) {
-          tl.from(left, {
-            x: -30,
-            opacity: 0,
-            duration: 0.5,
-            ease: "power2.out",
+          const tl = gsap.timeline({
+            scrollTrigger: {
+              trigger: pair,
+              start: "top 85%",
+              once: true,
+            },
           });
-        }
-        if (right) {
-          tl.from(
-            right,
-            {
-              x: 30,
+
+          if (left) {
+            tl.from(left, {
+              x: -30,
               opacity: 0,
               duration: 0.5,
               ease: "power2.out",
-            },
-            "-=0.3"
-          );
-        }
-      });
-    }, pairsRef);
+            });
+          }
+          if (right) {
+            tl.from(
+              right,
+              {
+                x: 30,
+                opacity: 0,
+                duration: 0.5,
+                ease: "power2.out",
+              },
+              "-=0.3"
+            );
+          }
+        });
+      }, pairsRef);
+    });
 
-    return () => ctx.revert();
+    return () => {
+      cancelled = true;
+      ctx?.revert();
+    };
   }, [prefersReducedMotion]);
 
   return (

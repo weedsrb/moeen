@@ -1,13 +1,11 @@
 "use client";
 
 import { useRef, useEffect } from "react";
-import { gsap } from "gsap";
-import { ScrollTrigger } from "gsap/ScrollTrigger";
+import type { gsap } from "gsap";
+import { loadGsap } from "@/lib/animations/gsap";
 import { steps } from "@/lib/landing-data";
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
 import { SectionWrapper } from "./section-wrapper";
-
-gsap.registerPlugin(ScrollTrigger);
 
 export function HowItWorksSection() {
   const stepsRef = useRef<HTMLDivElement>(null);
@@ -16,46 +14,55 @@ export function HowItWorksSection() {
   useEffect(() => {
     if (prefersReducedMotion || !stepsRef.current) return;
 
-    const stepEls = stepsRef.current.querySelectorAll("[data-step]");
-    const connectors = stepsRef.current.querySelectorAll("[data-connector]");
+    let cancelled = false;
+    let ctx: gsap.Context | undefined;
 
-    const ctx = gsap.context(() => {
-      const tl = gsap.timeline({
-        scrollTrigger: {
-          trigger: stepsRef.current,
-          start: "top 85%",
-          once: true,
-        },
-      });
+    loadGsap().then(({ gsap }) => {
+      if (cancelled || !stepsRef.current) return;
+      const stepEls = stepsRef.current.querySelectorAll("[data-step]");
+      const connectors = stepsRef.current.querySelectorAll("[data-connector]");
 
-      stepEls.forEach((step, i) => {
-        tl.from(
-          step,
-          {
-            y: 30,
-            opacity: 0,
-            duration: 0.4,
-            ease: "power2.out",
+      ctx = gsap.context(() => {
+        const tl = gsap.timeline({
+          scrollTrigger: {
+            trigger: stepsRef.current,
+            start: "top 85%",
+            once: true,
           },
-          i === 0 ? "+=0" : "-=0.15"
-        );
+        });
 
-        if (connectors[i]) {
+        stepEls.forEach((step, i) => {
           tl.from(
-            connectors[i],
+            step,
             {
-              scaleX: 0,
+              y: 30,
               opacity: 0,
-              duration: 0.3,
+              duration: 0.4,
               ease: "power2.out",
             },
-            "-=0.2"
+            i === 0 ? "+=0" : "-=0.15"
           );
-        }
-      });
-    }, stepsRef);
 
-    return () => ctx.revert();
+          if (connectors[i]) {
+            tl.from(
+              connectors[i],
+              {
+                scaleX: 0,
+                opacity: 0,
+                duration: 0.3,
+                ease: "power2.out",
+              },
+              "-=0.2"
+            );
+          }
+        });
+      }, stepsRef);
+    });
+
+    return () => {
+      cancelled = true;
+      ctx?.revert();
+    };
   }, [prefersReducedMotion]);
 
   return (

@@ -1,13 +1,11 @@
 "use client";
 
 import { useRef, useEffect } from "react";
-import { gsap } from "gsap";
-import { ScrollTrigger } from "gsap/ScrollTrigger";
+import type { gsap } from "gsap";
+import { loadGsap } from "@/lib/animations/gsap";
 import { problems } from "@/lib/landing-data";
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
 import { SectionWrapper } from "./section-wrapper";
-
-gsap.registerPlugin(ScrollTrigger);
 
 export function ProblemSection() {
   const cardsRef = useRef<HTMLDivElement>(null);
@@ -16,24 +14,32 @@ export function ProblemSection() {
   useEffect(() => {
     if (prefersReducedMotion || !cardsRef.current) return;
 
-    const cards = cardsRef.current.querySelectorAll("[data-problem-card]");
+    let cancelled = false;
+    let ctx: gsap.Context | undefined;
 
-    const ctx = gsap.context(() => {
-      gsap.from(cards, {
-        y: 40,
-        opacity: 0,
-        duration: 0.5,
-        stagger: 0.15,
-        ease: "power2.out",
-        scrollTrigger: {
-          trigger: cardsRef.current,
-          start: "top 85%",
-          once: true,
-        },
-      });
-    }, cardsRef);
+    loadGsap().then(({ gsap }) => {
+      if (cancelled || !cardsRef.current) return;
+      const cards = cardsRef.current.querySelectorAll("[data-problem-card]");
+      ctx = gsap.context(() => {
+        gsap.from(cards, {
+          y: 40,
+          opacity: 0,
+          duration: 0.5,
+          stagger: 0.15,
+          ease: "power2.out",
+          scrollTrigger: {
+            trigger: cardsRef.current,
+            start: "top 85%",
+            once: true,
+          },
+        });
+      }, cardsRef);
+    });
 
-    return () => ctx.revert();
+    return () => {
+      cancelled = true;
+      ctx?.revert();
+    };
   }, [prefersReducedMotion]);
 
   return (
