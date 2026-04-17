@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { cn } from "@/lib/utils";
 import {
   Table,
@@ -61,9 +62,12 @@ export function ProductTable({
                   <Link href={`/inventory/${product.id}`}>
                     <div className="h-8 w-8 rounded bg-muted overflow-hidden flex items-center justify-center">
                       {product.image_url ? (
-                        <img
+                        <Image
                           src={product.image_url}
                           alt={product.name}
+                          width={32}
+                          height={32}
+                          sizes="32px"
                           className="h-full w-full object-cover"
                         />
                       ) : (
