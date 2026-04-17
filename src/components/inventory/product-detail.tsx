@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import dynamic from "next/dynamic";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -15,8 +16,15 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { StockBar } from "./stock-bar";
-import { StockAdjustmentDialog } from "./stock-adjustment-dialog";
-import { ProductForm } from "./product-form";
+
+const StockAdjustmentDialog = dynamic(
+  () => import("./stock-adjustment-dialog").then((m) => m.StockAdjustmentDialog),
+  { ssr: false, loading: () => null }
+);
+const ProductForm = dynamic(
+  () => import("./product-form").then((m) => m.ProductForm),
+  { ssr: false, loading: () => null }
+);
 import {
   ArrowLeft,
   Edit,
