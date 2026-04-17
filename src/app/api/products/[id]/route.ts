@@ -1,25 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { updateProductSchema } from "@/lib/validations/product";
+import { requireMerchantForApi } from "@/lib/auth/require-merchant";
 
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const supabase = await createClient();
+  const auth = await requireMerchantForApi();
+  if ("error" in auth) return auth.error;
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const supabase = await createClient();
 
   const { data: product, error } = await supabase
     .from("products")
     .select("*")
     .eq("id", id)
+    .eq("merchant_id", auth.merchant.id)
     .single();
 
   if (error || !product) {
@@ -34,14 +32,10 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const supabase = await createClient();
+  const auth = await requireMerchantForApi();
+  if ("error" in auth) return auth.error;
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const supabase = await createClient();
 
   const body = await request.json();
   const parsed = updateProductSchema.safeParse(body);
@@ -53,7 +47,6 @@ export async function PATCH(
     );
   }
 
-  // Build update object with only provided fields
   const updateData: Record<string, unknown> = {};
   const fields = parsed.data;
   if (fields.name !== undefined) updateData.name = fields.name;
@@ -75,6 +68,7 @@ export async function PATCH(
     .from("products")
     .update(updateData)
     .eq("id", id)
+    .eq("merchant_id", auth.merchant.id)
     .select()
     .single();
 
@@ -90,20 +84,16 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  const auth = await requireMerchantForApi();
+  if ("error" in auth) return auth.error;
+
   const supabase = await createClient();
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  // Soft delete
   const { error } = await supabase
     .from("products")
     .update({ is_active: false })
-    .eq("id", id);
+    .eq("id", id)
+    .eq("merchant_id", auth.merchant.id);
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });

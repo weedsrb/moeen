@@ -1,29 +1,18 @@
-import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { PageTransition } from "@/components/layout/page-transition";
 import { ConversationsContent } from "@/components/conversations/conversations-content";
 import type { ConversationWithCustomer } from "@/components/conversations/conversation-list";
+import { CONVERSATION_WITH_CUSTOMER_COLUMNS } from "@/lib/db/columns";
+import { requireMerchant } from "@/lib/auth/require-merchant";
 
 export default async function ConversationsPage() {
+  const { merchant } = await requireMerchant();
   const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
-
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("id")
-    .eq("user_id", user.id)
-    .single();
-
-  if (!merchant) redirect("/onboarding");
 
   // Fetch conversations with customer names
   const { data: conversations } = await supabase
     .from("conversations")
-    .select("*, customers(name, platform_user_id)")
+    .select(CONVERSATION_WITH_CUSTOMER_COLUMNS)
     .eq("merchant_id", merchant.id)
     .order("last_message_at", { ascending: false, nullsFirst: false });
 
@@ -33,7 +22,7 @@ export default async function ConversationsPage() {
         <h1 className="text-2xl font-semibold shrink-0">Messages</h1>
         <ConversationsContent
           initialConversations={
-            (conversations as ConversationWithCustomer[]) ?? []
+            (conversations as unknown as ConversationWithCustomer[]) ?? []
           }
           merchantId={merchant.id}
         />

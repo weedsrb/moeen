@@ -11,6 +11,7 @@ import type {
   WhatsAppErrorResponse,
 } from "@/types/whatsapp";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { MESSAGE_COLUMNS } from "@/lib/db/columns";
 
 const GRAPH_API_BASE = "https://graph.facebook.com/v21.0";
 
@@ -130,7 +131,7 @@ export class WhatsAppProvider implements MessagingProvider {
 
     const { data: messages } = await supabase
       .from("messages")
-      .select("*")
+      .select(MESSAGE_COLUMNS)
       .eq("conversation_id", conversation.id)
       .order("created_at", { ascending: false })
       .limit(limit);

@@ -1,9 +1,10 @@
-export const dynamic = "force-dynamic";
+import { requireNoAuth } from "@/lib/auth/require-merchant";
 
-export default function PublicLayout({
+export default async function PublicLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  await requireNoAuth();
   return <>{children}</>;
 }

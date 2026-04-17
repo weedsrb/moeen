@@ -1,7 +1,8 @@
 import { PageTransition } from "@/components/layout/page-transition";
 import { ProductDetail } from "@/components/inventory/product-detail";
 import { createClient } from "@/lib/supabase/server";
-import { redirect, notFound } from "next/navigation";
+import { notFound } from "next/navigation";
+import { requireMerchant } from "@/lib/auth/require-merchant";
 
 export default async function ProductDetailPage({
   params,
@@ -9,20 +10,8 @@ export default async function ProductDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  const { merchant } = await requireMerchant();
   const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
-
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("id")
-    .eq("user_id", user.id)
-    .single();
-
-  if (!merchant) redirect("/onboarding");
 
   // Parallel fetch: product, settings, adjustments
   const [productResult, settingsResult, adjustmentsResult] = await Promise.all([

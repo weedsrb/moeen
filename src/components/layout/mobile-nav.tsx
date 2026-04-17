@@ -3,8 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { useMerchant } from "@/components/layout/merchant-provider";
-import { useUnreadCount } from "@/hooks/use-unread-count";
+import { useUnreadCount } from "@/components/layout/unread-count-provider";
 import {
   LayoutDashboard,
   MessageSquare,
@@ -25,8 +24,7 @@ const navItems = [
 
 export function MobileNav() {
   const pathname = usePathname();
-  const { id: merchantId } = useMerchant();
-  const unreadCount = useUnreadCount(merchantId);
+  const unreadCount = useUnreadCount();
 
   return (
     <nav className="sm:hidden fixed bottom-0 inset-x-0 z-50 bg-card border-t border-border pb-[env(safe-area-inset-bottom)]">

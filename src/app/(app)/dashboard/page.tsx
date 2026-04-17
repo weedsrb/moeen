@@ -3,7 +3,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { InventoryAlerts } from "@/components/dashboard/inventory-alerts";
 import { WhatsAppPrompt } from "@/components/dashboard/whatsapp-prompt";
 import { createClient } from "@/lib/supabase/server";
-import { redirect } from "next/navigation";
+import { PRODUCT_COLUMNS } from "@/lib/db/columns";
+import { requireMerchant } from "@/lib/auth/require-merchant";
 import {
   ClipboardList,
   Clock,
@@ -18,20 +19,8 @@ import type { Product } from "@/types/product";
 import { getStockStatus } from "@/lib/utils/inventory";
 
 export default async function DashboardPage() {
+  const { merchant } = await requireMerchant();
   const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
-
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("id")
-    .eq("user_id", user.id)
-    .single();
-
-  if (!merchant) redirect("/onboarding");
 
   // Parallel fetch: products, settings, order counts, today's stats, flags
   const today = new Date();
@@ -52,7 +41,7 @@ export default async function DashboardPage() {
   ] = await Promise.all([
     supabase
       .from("products")
-      .select("*")
+      .select(PRODUCT_COLUMNS)
       .eq("merchant_id", merchant.id)
       .eq("is_active", true),
     supabase

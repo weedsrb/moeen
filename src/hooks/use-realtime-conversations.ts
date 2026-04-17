@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { Conversation } from "@/types/message";
 
@@ -8,6 +8,11 @@ export function useRealtimeConversations(
   merchantId: string,
   onUpdate: (conversation: Conversation) => void
 ) {
+  const cbRef = useRef(onUpdate);
+  useEffect(() => {
+    cbRef.current = onUpdate;
+  });
+
   useEffect(() => {
     const supabase = createClient();
 
@@ -24,7 +29,7 @@ export function useRealtimeConversations(
         (payload) => {
           const conversation = payload.new as Conversation;
           if (conversation) {
-            onUpdate(conversation);
+            cbRef.current(conversation);
           }
         }
       )
@@ -33,5 +38,5 @@ export function useRealtimeConversations(
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [merchantId, onUpdate]);
+  }, [merchantId]);
 }

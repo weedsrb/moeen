@@ -2,26 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { WhatsAppProvider } from "@/lib/messaging/whatsapp";
 import { sendMessageSchema } from "@/lib/validations/messaging";
+import { requireMerchantForApi } from "@/lib/auth/require-merchant";
 
 export async function POST(request: NextRequest) {
+  const auth = await requireMerchantForApi();
+  if ("error" in auth) return auth.error;
+  const merchant = auth.merchant;
+
   const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("id")
-    .eq("user_id", user.id)
-    .single();
-
-  if (!merchant) {
-    return NextResponse.json({ error: "Merchant not found" }, { status: 404 });
-  }
 
   const body = await request.json();
   const parsed = sendMessageSchema.safeParse(body);
@@ -33,7 +21,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Fetch conversation and verify ownership
   const { data: conversation } = await supabase
     .from("conversations")
     .select("id, platform_chat_id, platform")
@@ -55,7 +42,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Get WhatsApp credentials
   const { data: settings } = await supabase
     .from("merchant_settings")
     .select(
@@ -75,7 +61,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Send via WhatsApp
   const provider = new WhatsAppProvider(
     settings.whatsapp_phone_number_id,
     settings.whatsapp_access_token
@@ -92,7 +77,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Save outbound message to DB
   const { data: message, error: msgError } = await supabase
     .from("messages")
     .insert({
@@ -113,7 +97,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: msgError.message }, { status: 500 });
   }
 
-  // Update conversation metadata
   const preview = parsed.data.content.substring(0, 100);
   await supabase
     .from("conversations")

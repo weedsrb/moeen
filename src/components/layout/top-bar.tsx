@@ -1,7 +1,6 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
 import { useMerchant } from "./merchant-provider";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
@@ -21,7 +20,6 @@ import { Bell, LogOut } from "lucide-react";
 export function TopBar() {
   const merchant = useMerchant();
   const router = useRouter();
-  const supabase = createClient();
 
   const initials = merchant.businessName
     .split(" ")
@@ -31,8 +29,9 @@ export function TopBar() {
     .toUpperCase();
 
   async function handleSignOut() {
-    await supabase.auth.signOut();
+    await fetch("/api/auth/signout", { method: "POST" });
     router.push("/login");
+    router.refresh();
   }
 
   return (

@@ -2,12 +2,10 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { useMerchant } from "@/components/layout/merchant-provider";
-import { useUnreadCount } from "@/hooks/use-unread-count";
+import { useUnreadCount } from "@/components/layout/unread-count-provider";
 import {
   LayoutDashboard,
   MessageSquare,
@@ -30,13 +28,12 @@ const navItems = [
 export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
-  const supabase = createClient();
-  const { id: merchantId } = useMerchant();
-  const unreadCount = useUnreadCount(merchantId);
+  const unreadCount = useUnreadCount();
 
   async function handleSignOut() {
-    await supabase.auth.signOut();
+    await fetch("/api/auth/signout", { method: "POST" });
     router.push("/login");
+    router.refresh();
   }
 
   return (

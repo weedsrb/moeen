@@ -1,30 +1,19 @@
 import { PageTransition } from "@/components/layout/page-transition";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { createClient } from "@/lib/supabase/server";
-import { redirect } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { AlertTriangle, CheckCircle2 } from "lucide-react";
 import type { FlagPriority } from "@/types/flag";
+import { FLAG_COLUMNS } from "@/lib/db/columns";
+import { requireMerchant } from "@/lib/auth/require-merchant";
 
 export default async function FlagsPage() {
+  const { merchant } = await requireMerchant();
   const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
-
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("id")
-    .eq("user_id", user.id)
-    .single();
-
-  if (!merchant) redirect("/onboarding");
 
   const { data: flags } = await supabase
     .from("flags")
-    .select("*")
+    .select(FLAG_COLUMNS)
     .eq("merchant_id", merchant.id)
     .eq("is_resolved", false)
     .order("created_at", { ascending: false });

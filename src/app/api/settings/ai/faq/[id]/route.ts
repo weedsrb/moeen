@@ -1,48 +1,29 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { updateFAQSchema } from "@/lib/validations/ai-settings";
-
-async function getOwnershipContext(faqId: string) {
-  const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return { supabase, error: "Unauthorized" as const };
-
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("id")
-    .eq("user_id", user.id)
-    .single();
-  if (!merchant) return { supabase, error: "Merchant not found" as const };
-
-  // Verify ownership
-  const { data: faqEntry } = await supabase
-    .from("merchant_faq")
-    .select("id, merchant_id")
-    .eq("id", faqId)
-    .single();
-
-  if (!faqEntry) return { supabase, error: "Not found" as const };
-  if (faqEntry.merchant_id !== merchant.id) return { supabase, error: "Forbidden" as const };
-
-  return { supabase, merchant, faqEntry };
-}
+import { requireMerchantForApi } from "@/lib/auth/require-merchant";
 
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const ctx = await getOwnershipContext(id);
+  const auth = await requireMerchantForApi();
+  if ("error" in auth) return auth.error;
 
-  if ("error" in ctx) {
-    const status = ctx.error === "Unauthorized" ? 401
-      : ctx.error === "Forbidden" ? 403
-      : ctx.error === "Not found" ? 404
-      : 404;
-    return NextResponse.json({ error: ctx.error }, { status });
+  const supabase = await createClient();
+
+  const { data: faqEntry } = await supabase
+    .from("merchant_faq")
+    .select("id, merchant_id")
+    .eq("id", id)
+    .single();
+
+  if (!faqEntry) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  if (faqEntry.merchant_id !== auth.merchant.id) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const body = await request.json();
@@ -55,7 +36,7 @@ export async function PATCH(
     );
   }
 
-  const { data, error } = await ctx.supabase
+  const { data, error } = await supabase
     .from("merchant_faq")
     .update(parsed.data)
     .eq("id", id)
@@ -72,16 +53,25 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const ctx = await getOwnershipContext(id);
+  const auth = await requireMerchantForApi();
+  if ("error" in auth) return auth.error;
 
-  if ("error" in ctx) {
-    const status = ctx.error === "Unauthorized" ? 401
-      : ctx.error === "Forbidden" ? 403
-      : 404;
-    return NextResponse.json({ error: ctx.error }, { status });
+  const supabase = await createClient();
+
+  const { data: faqEntry } = await supabase
+    .from("merchant_faq")
+    .select("id, merchant_id")
+    .eq("id", id)
+    .single();
+
+  if (!faqEntry) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  if (faqEntry.merchant_id !== auth.merchant.id) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const { error } = await ctx.supabase
+  const { error } = await supabase
     .from("merchant_faq")
     .delete()
     .eq("id", id);

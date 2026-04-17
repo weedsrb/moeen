@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { Message } from "@/types/message";
 
@@ -8,6 +8,11 @@ export function useRealtimeMessages(
   conversationId: string | null,
   onNewMessage: (message: Message) => void
 ) {
+  const cbRef = useRef(onNewMessage);
+  useEffect(() => {
+    cbRef.current = onNewMessage;
+  });
+
   useEffect(() => {
     if (!conversationId) return;
 
@@ -26,7 +31,7 @@ export function useRealtimeMessages(
         (payload) => {
           const message = payload.new as Message;
           if (message) {
-            onNewMessage(message);
+            cbRef.current(message);
           }
         }
       )
@@ -35,5 +40,5 @@ export function useRealtimeMessages(
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [conversationId, onNewMessage]);
+  }, [conversationId]);
 }

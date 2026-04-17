@@ -1,26 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createFAQSchema } from "@/lib/validations/ai-settings";
+import { requireMerchantForApi } from "@/lib/auth/require-merchant";
 
 export async function GET() {
+  const auth = await requireMerchantForApi();
+  if ("error" in auth) return auth.error;
+
   const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("id")
-    .eq("user_id", user.id)
-    .single();
-  if (!merchant) return NextResponse.json({ error: "Merchant not found" }, { status: 404 });
 
   const { data, error } = await supabase
     .from("merchant_faq")
     .select("id, question, answer, display_order")
-    .eq("merchant_id", merchant.id)
+    .eq("merchant_id", auth.merchant.id)
     .order("display_order");
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -29,19 +21,10 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await requireMerchantForApi();
+  if ("error" in auth) return auth.error;
+
   const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("id")
-    .eq("user_id", user.id)
-    .single();
-  if (!merchant) return NextResponse.json({ error: "Merchant not found" }, { status: 404 });
 
   const body = await request.json();
   const parsed = createFAQSchema.safeParse(body);
@@ -56,7 +39,7 @@ export async function POST(request: NextRequest) {
   const { data, error } = await supabase
     .from("merchant_faq")
     .insert({
-      merchant_id: merchant.id,
+      merchant_id: auth.merchant.id,
       question: parsed.data.question,
       answer: parsed.data.answer,
       display_order: parsed.data.display_order ?? 0,
