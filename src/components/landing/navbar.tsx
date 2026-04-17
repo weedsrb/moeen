@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
@@ -20,7 +19,7 @@ export function Navbar() {
   };
 
   return (
-    <motion.nav
+    <nav
       className={cn(
         "fixed inset-x-0 top-0 z-50 transition-colors duration-300",
         scrolled
@@ -41,6 +40,6 @@ export function Navbar() {
           </Button>
         </div>
       </div>
-    </motion.nav>
+    </nav>
   );
 }
