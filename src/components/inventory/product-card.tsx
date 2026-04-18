@@ -1,6 +1,8 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
+import { useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -24,9 +26,15 @@ interface ProductCardProps {
 export function ProductCard({ product, merchantThreshold }: ProductCardProps) {
   const status = getStockStatus(product, merchantThreshold);
   const available = getAvailableQuantity(product);
+  const href = `/inventory/${product.id}`;
+  const router = useRouter();
 
   return (
-    <Link href={`/inventory/${product.id}`}>
+    <Link
+      href={href}
+      onMouseEnter={() => router.prefetch(href)}
+      onFocus={() => router.prefetch(href)}
+    >
       <Card
         className={cn(
           "transition-colors hover:border-foreground/20 cursor-pointer",
@@ -35,12 +43,14 @@ export function ProductCard({ product, merchantThreshold }: ProductCardProps) {
       >
         <CardContent className="p-4 space-y-3">
           {/* Image */}
-          <div className="aspect-square rounded-md bg-muted overflow-hidden flex items-center justify-center">
+          <div className="relative aspect-square rounded-md bg-muted overflow-hidden flex items-center justify-center">
             {product.image_url ? (
-              <img
+              <Image
                 src={product.image_url}
                 alt={product.name}
-                className="h-full w-full object-cover"
+                fill
+                sizes="(min-width: 1280px) 25vw, (min-width: 1024px) 33vw, (min-width: 640px) 50vw, 100vw"
+                className="object-cover"
               />
             ) : (
               <Package className="h-8 w-8 text-muted-foreground/40" />

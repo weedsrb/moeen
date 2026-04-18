@@ -1,41 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { updateAISettingsSchema } from "@/lib/validations/ai-settings";
-
-async function getAuthenticatedMerchant() {
-  const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return { supabase, user: null, merchant: null };
-
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("id")
-    .eq("user_id", user.id)
-    .single();
-
-  return { supabase, user, merchant };
-}
+import { requireMerchantForApi } from "@/lib/auth/require-merchant";
 
 export async function GET() {
-  const { supabase, user, merchant } = await getAuthenticatedMerchant();
+  const auth = await requireMerchantForApi();
+  if ("error" in auth) return auth.error;
 
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  if (!merchant) return NextResponse.json({ error: "Merchant not found" }, { status: 404 });
+  const supabase = await createClient();
 
   const [settingsResult, faqResult] = await Promise.all([
     supabase
       .from("merchant_settings")
-      .select("ai_confidence_threshold, ai_auto_clarify, ai_handoff_message, ai_persona_name, ai_tone, ai_greeting, ai_business_context, ai_custom_instructions, ai_response_language, ai_auto_acknowledge, ai_acknowledge_template")
-      .eq("merchant_id", merchant.id)
+      .select(
+        "ai_confidence_threshold, ai_auto_clarify, ai_handoff_message, ai_persona_name, ai_tone, ai_greeting, ai_business_context, ai_custom_instructions, ai_response_language, ai_auto_acknowledge, ai_acknowledge_template"
+      )
+      .eq("merchant_id", auth.merchant.id)
       .single(),
 
     supabase
       .from("merchant_faq")
       .select("id, question, answer, display_order")
-      .eq("merchant_id", merchant.id)
+      .eq("merchant_id", auth.merchant.id)
       .order("display_order"),
   ]);
 
@@ -46,10 +32,10 @@ export async function GET() {
 }
 
 export async function PATCH(request: NextRequest) {
-  const { supabase, user, merchant } = await getAuthenticatedMerchant();
+  const auth = await requireMerchantForApi();
+  if ("error" in auth) return auth.error;
 
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  if (!merchant) return NextResponse.json({ error: "Merchant not found" }, { status: 404 });
+  const supabase = await createClient();
 
   const body = await request.json();
   const parsed = updateAISettingsSchema.safeParse(body);
@@ -64,7 +50,7 @@ export async function PATCH(request: NextRequest) {
   const { error } = await supabase
     .from("merchant_settings")
     .update(parsed.data)
-    .eq("merchant_id", merchant.id);
+    .eq("merchant_id", auth.merchant.id);
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });

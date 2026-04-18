@@ -1,17 +1,26 @@
 "use client";
 
 import { useState, useCallback, useRef } from "react";
+import dynamic from "next/dynamic";
 import { useRealtimeConversations } from "@/hooks/use-realtime-conversations";
 import {
   ConversationList,
   type ConversationWithCustomer,
 } from "./conversation-list";
-import { ChatThread, type ChatSendRef } from "@/components/chat/chat-thread";
-import { ReplyInput } from "@/components/chat/reply-input";
+import type { ChatSendRef } from "@/components/chat/chat-thread";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Conversation } from "@/types/message";
+
+const ChatThread = dynamic(
+  () => import("@/components/chat/chat-thread").then((m) => m.ChatThread),
+  { ssr: false, loading: () => null }
+);
+const ReplyInput = dynamic(
+  () => import("@/components/chat/reply-input").then((m) => m.ReplyInput),
+  { ssr: false, loading: () => null }
+);
 
 interface ConversationsContentProps {
   initialConversations: ConversationWithCustomer[];

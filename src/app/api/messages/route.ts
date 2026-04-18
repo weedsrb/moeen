@@ -1,25 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { MESSAGE_COLUMNS } from "@/lib/db/columns";
+import { requireMerchantForApi } from "@/lib/auth/require-merchant";
 
 export async function GET(request: NextRequest) {
+  const auth = await requireMerchantForApi();
+  if ("error" in auth) return auth.error;
+
   const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("id")
-    .eq("user_id", user.id)
-    .single();
-
-  if (!merchant) {
-    return NextResponse.json({ error: "Merchant not found" }, { status: 404 });
-  }
 
   const conversationId = request.nextUrl.searchParams.get("conversationId");
   if (!conversationId) {
@@ -29,12 +17,11 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // Verify conversation belongs to this merchant
   const { data: conversation } = await supabase
     .from("conversations")
     .select("id")
     .eq("id", conversationId)
-    .eq("merchant_id", merchant.id)
+    .eq("merchant_id", auth.merchant.id)
     .single();
 
   if (!conversation) {
@@ -44,10 +31,9 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // Fetch messages
   const { data: messages, error } = await supabase
     .from("messages")
-    .select("*")
+    .select(MESSAGE_COLUMNS)
     .eq("conversation_id", conversationId)
     .order("created_at", { ascending: true })
     .limit(50);
@@ -56,7 +42,6 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  // Reset unread count
   await supabase
     .from("conversations")
     .update({ unread_count: 0 })

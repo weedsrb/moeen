@@ -1,30 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { stockAdjustmentSchema } from "@/lib/validations/product";
+import { requireMerchantForApi } from "@/lib/auth/require-merchant";
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  const auth = await requireMerchantForApi();
+  if ("error" in auth) return auth.error;
+  const merchant = auth.merchant;
+
   const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("id")
-    .eq("user_id", user.id)
-    .single();
-
-  if (!merchant) {
-    return NextResponse.json({ error: "Merchant not found" }, { status: 404 });
-  }
 
   const body = await request.json();
   const parsed = stockAdjustmentSchema.safeParse(body);
@@ -36,7 +24,6 @@ export async function POST(
     );
   }
 
-  // Fetch current product
   const { data: product, error: fetchError } = await supabase
     .from("products")
     .select("quantity_total, merchant_id")
@@ -63,7 +50,6 @@ export async function POST(
     );
   }
 
-  // Update product quantity
   const { error: updateError } = await supabase
     .from("products")
     .update({ quantity_total: newQuantity })
@@ -73,7 +59,6 @@ export async function POST(
     return NextResponse.json({ error: updateError.message }, { status: 500 });
   }
 
-  // Log the adjustment
   const { data: adjustment, error: logError } = await supabase
     .from("stock_adjustments")
     .insert({

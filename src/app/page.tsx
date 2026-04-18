@@ -1,11 +1,33 @@
 import type { Metadata } from "next";
+import dynamic from "next/dynamic";
 import { Navbar } from "@/components/landing/navbar";
 import { HeroSection } from "@/components/landing/hero-section";
-import { ProblemSection } from "@/components/landing/problem-section";
-import { SolutionSection } from "@/components/landing/solution-section";
-import { HowItWorksSection } from "@/components/landing/how-it-works-section";
-import { TrustSection } from "@/components/landing/trust-section";
-import { FooterCtaSection } from "@/components/landing/footer-cta-section";
+
+const ProblemSection = dynamic(() =>
+  import("@/components/landing/problem-section").then((m) => ({
+    default: m.ProblemSection,
+  })),
+);
+const SolutionSection = dynamic(() =>
+  import("@/components/landing/solution-section").then((m) => ({
+    default: m.SolutionSection,
+  })),
+);
+const HowItWorksSection = dynamic(() =>
+  import("@/components/landing/how-it-works-section").then((m) => ({
+    default: m.HowItWorksSection,
+  })),
+);
+const TrustSection = dynamic(() =>
+  import("@/components/landing/trust-section").then((m) => ({
+    default: m.TrustSection,
+  })),
+);
+const FooterCtaSection = dynamic(() =>
+  import("@/components/landing/footer-cta-section").then((m) => ({
+    default: m.FooterCtaSection,
+  })),
+);
 
 export const metadata: Metadata = {
   title: "Mo'een — Turn Telegram Messages into Organized Orders",

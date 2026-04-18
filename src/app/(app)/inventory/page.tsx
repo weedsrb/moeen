@@ -1,29 +1,18 @@
 import { PageTransition } from "@/components/layout/page-transition";
 import { InventoryContent } from "@/components/inventory/inventory-content";
 import { createClient } from "@/lib/supabase/server";
-import { redirect } from "next/navigation";
+import { PRODUCT_COLUMNS } from "@/lib/db/columns";
+import { requireMerchant } from "@/lib/auth/require-merchant";
 
 export default async function InventoryPage() {
+  const { merchant } = await requireMerchant();
   const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
-
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("id")
-    .eq("user_id", user.id)
-    .single();
-
-  if (!merchant) redirect("/onboarding");
 
   // Parallel fetch: products + settings
   const [productsResult, settingsResult] = await Promise.all([
     supabase
       .from("products")
-      .select("*")
+      .select(PRODUCT_COLUMNS)
       .eq("merchant_id", merchant.id)
       .eq("is_active", true)
       .order("created_at", { ascending: false }),

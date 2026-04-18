@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState } from "react";
-import { createMerchantProfile, type OnboardingState } from "@/app/(app)/onboarding/actions";
+import { createMerchantProfile, type OnboardingState } from "@/app/(onboarding)/onboarding/actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";

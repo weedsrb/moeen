@@ -160,6 +160,70 @@
   }
 }
 
+/* Card entry fade-up (used by lists with staggered reveals) */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 0.3s ease-out both;
+}
+
+/* Page-route transition (replaces Framer Motion on every (app) route) */
+@keyframes page-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.page-fade {
+  animation: page-fade 150ms ease-out both;
+}
+
+/* Shimmer skeleton (used by per-route loading.tsx) */
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--muted) 0%,
+    var(--border) 50%,
+    var(--muted) 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-up {
+    animation: none;
+  }
+  .page-fade {
+    animation: none;
+  }
+  .skeleton-shimmer {
+    animation: none;
+    background: var(--muted);
+  }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

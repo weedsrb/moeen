@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { processInboundMessage } from "@/lib/ai/process";
 import { z } from "zod/v4";
+import { requireMerchantForApi } from "@/lib/auth/require-merchant";
 
 const reprocessSchema = z.object({
   messageId: z.string().uuid(),
@@ -14,24 +14,9 @@ const reprocessSchema = z.object({
  * Requires authentication (user must own the merchant).
  */
 export async function POST(request: NextRequest) {
-  const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("id")
-    .eq("user_id", user.id)
-    .single();
-
-  if (!merchant) {
-    return NextResponse.json({ error: "Merchant not found" }, { status: 404 });
-  }
+  const auth = await requireMerchantForApi();
+  if ("error" in auth) return auth.error;
+  const merchant = auth.merchant;
 
   const body = await request.json();
   const parsed = reprocessSchema.safeParse(body);
@@ -43,7 +28,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Fetch the message and verify it belongs to this merchant
   const admin = createAdminClient();
   const { data: message } = await admin
     .from("messages")
@@ -56,7 +40,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Message not found" }, { status: 404 });
   }
 
-  // Fetch conversation for chatId and customer
   const { data: conversation } = await admin
     .from("conversations")
     .select("id, platform_chat_id, customer_id")
@@ -70,7 +53,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Fetch WhatsApp credentials
   const { data: settings } = await admin
     .from("merchant_settings")
     .select("whatsapp_phone_number_id, whatsapp_access_token")
@@ -84,13 +66,11 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Reset AI fields before reprocessing
   await admin
     .from("messages")
     .update({ ai_processed: false, ai_result: null, has_order_signal: false })
     .eq("id", message.id);
 
-  // Run pipeline
   await processInboundMessage({
     messageId: message.id,
     merchantId: merchant.id,

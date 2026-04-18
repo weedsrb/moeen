@@ -1,9 +1,12 @@
+import { Suspense } from "react";
 import { PageTransition } from "@/components/layout/page-transition";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { InventoryAlerts } from "@/components/dashboard/inventory-alerts";
+import { InventoryAlertsAsync } from "@/components/dashboard/inventory-alerts-async";
+import { InventoryAlertsSkeleton } from "@/components/dashboard/inventory-alerts-skeleton";
 import { WhatsAppPrompt } from "@/components/dashboard/whatsapp-prompt";
 import { createClient } from "@/lib/supabase/server";
-import { redirect } from "next/navigation";
+import { requireMerchant } from "@/lib/auth/require-merchant";
+import type { DashboardMetrics } from "@/types/dashboard";
 import {
   ClipboardList,
   Clock,
@@ -14,135 +17,54 @@ import {
   Package,
   PackageCheck,
 } from "lucide-react";
-import type { Product } from "@/types/product";
-import { getStockStatus } from "@/lib/utils/inventory";
 
 export default async function DashboardPage() {
+  const { merchant } = await requireMerchant();
   const supabase = await createClient();
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
-
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("id")
-    .eq("user_id", user.id)
-    .single();
-
-  if (!merchant) redirect("/onboarding");
-
-  // Parallel fetch: products, settings, order counts, today's stats, flags
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const todayISO = today.toISOString();
-
-  const [
-    productsResult,
-    settingsResult,
-    incomingResult,
-    pendingResult,
-    confirmedResult,
-    deliveryResult,
-    flagsResult,
-    todayMessagesResult,
-    todayOrdersResult,
-    todayDeliveredResult,
-  ] = await Promise.all([
-    supabase
-      .from("products")
-      .select("*")
-      .eq("merchant_id", merchant.id)
-      .eq("is_active", true),
+  // One settings fetch + one RPC call: dashboard_metrics collapses
+  // the 8 KPI counts (migration 009) into a single round trip.
+  const [settingsResult, metricsResult] = await Promise.all([
     supabase
       .from("merchant_settings")
       .select("low_stock_threshold, whatsapp_connected")
       .eq("merchant_id", merchant.id)
       .single(),
-    supabase
-      .from("orders")
-      .select("*", { count: "exact", head: true })
-      .eq("merchant_id", merchant.id)
-      .eq("status", "incoming"),
-    supabase
-      .from("orders")
-      .select("*", { count: "exact", head: true })
-      .eq("merchant_id", merchant.id)
-      .eq("status", "pending"),
-    supabase
-      .from("orders")
-      .select("*", { count: "exact", head: true })
-      .eq("merchant_id", merchant.id)
-      .eq("status", "confirmed"),
-    supabase
-      .from("orders")
-      .select("*", { count: "exact", head: true })
-      .eq("merchant_id", merchant.id)
-      .eq("status", "out_for_delivery"),
-    supabase
-      .from("flags")
-      .select("*", { count: "exact", head: true })
-      .eq("merchant_id", merchant.id)
-      .eq("is_resolved", false),
-    supabase
-      .from("messages")
-      .select("*", { count: "exact", head: true })
-      .eq("merchant_id", merchant.id)
-      .eq("direction", "inbound")
-      .gte("created_at", todayISO),
-    supabase
-      .from("orders")
-      .select("*", { count: "exact", head: true })
-      .eq("merchant_id", merchant.id)
-      .gte("created_at", todayISO),
-    supabase
-      .from("orders")
-      .select("*", { count: "exact", head: true })
-      .eq("merchant_id", merchant.id)
-      .eq("status", "delivered")
-      .gte("delivered_at", todayISO),
+    supabase.rpc("dashboard_metrics", { p_merchant_id: merchant.id }),
   ]);
 
   const threshold = settingsResult.data?.low_stock_threshold ?? 5;
   const whatsappConnected = settingsResult.data?.whatsapp_connected ?? false;
-  const products = productsResult.data ?? [];
-
-  const outOfStock = products.filter(
-    (p: Product) => getStockStatus(p, threshold) === "out_of_stock"
-  );
-  const lowStock = products.filter(
-    (p: Product) => getStockStatus(p, threshold) === "low_stock"
-  );
+  const metrics = (metricsResult.data ?? null) as DashboardMetrics | null;
 
   const kpiCards = [
     {
       title: "New Orders",
-      value: incomingResult.count ?? 0,
+      value: metrics?.incoming_orders ?? 0,
       icon: ClipboardList,
       color: "text-blue-500",
     },
     {
       title: "Pending",
-      value: pendingResult.count ?? 0,
+      value: metrics?.pending_orders ?? 0,
       icon: Clock,
       color: "text-amber-500",
     },
     {
       title: "Confirmed",
-      value: confirmedResult.count ?? 0,
+      value: metrics?.confirmed_orders ?? 0,
       icon: CheckCircle2,
       color: "text-green-500",
     },
     {
       title: "Out for Delivery",
-      value: deliveryResult.count ?? 0,
+      value: metrics?.delivery_orders ?? 0,
       icon: Truck,
       color: "text-violet-500",
     },
     {
       title: "Flagged",
-      value: flagsResult.count ?? 0,
+      value: metrics?.open_flags ?? 0,
       icon: AlertTriangle,
       color: "text-red-500",
     },
@@ -176,8 +98,10 @@ export default async function DashboardPage() {
           })}
         </div>
 
-        {/* Inventory Alerts */}
-        <InventoryAlerts outOfStock={outOfStock} lowStock={lowStock} />
+        {/* Inventory Alerts — streams in after KPIs paint */}
+        <Suspense fallback={<InventoryAlertsSkeleton />}>
+          <InventoryAlertsAsync merchantId={merchant.id} threshold={threshold} />
+        </Suspense>
 
         {/* Today's Activity */}
         <Card>
@@ -190,7 +114,7 @@ export default async function DashboardPage() {
                 <div className="flex items-center justify-center gap-1.5">
                   <MessageSquare className="h-4 w-4 text-blue-500" />
                   <p className="text-2xl font-bold font-mono">
-                    {todayMessagesResult.count ?? 0}
+                    {metrics?.today_messages ?? 0}
                   </p>
                 </div>
                 <p className="text-xs text-muted-foreground">Messages</p>
@@ -199,7 +123,7 @@ export default async function DashboardPage() {
                 <div className="flex items-center justify-center gap-1.5">
                   <Package className="h-4 w-4 text-amber-500" />
                   <p className="text-2xl font-bold font-mono">
-                    {todayOrdersResult.count ?? 0}
+                    {metrics?.today_orders ?? 0}
                   </p>
                 </div>
                 <p className="text-xs text-muted-foreground">Orders</p>
@@ -208,7 +132,7 @@ export default async function DashboardPage() {
                 <div className="flex items-center justify-center gap-1.5">
                   <PackageCheck className="h-4 w-4 text-green-500" />
                   <p className="text-2xl font-bold font-mono">
-                    {todayDeliveredResult.count ?? 0}
+                    {metrics?.today_delivered ?? 0}
                   </p>
                 </div>
                 <p className="text-xs text-muted-foreground">Delivered</p>

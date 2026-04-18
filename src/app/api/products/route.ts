@@ -1,33 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createProductSchema } from "@/lib/validations/product";
+import { PRODUCT_COLUMNS } from "@/lib/db/columns";
+import { requireMerchantForApi } from "@/lib/auth/require-merchant";
 
 export async function GET() {
+  const auth = await requireMerchantForApi();
+  if ("error" in auth) return auth.error;
+
   const supabase = await createClient();
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  // Get merchant
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("id")
-    .eq("user_id", user.id)
-    .single();
-
-  if (!merchant) {
-    return NextResponse.json({ error: "Merchant not found" }, { status: 404 });
-  }
-
-  // Fetch all active products for this merchant
   const { data: products, error } = await supabase
     .from("products")
-    .select("*")
-    .eq("merchant_id", merchant.id)
+    .select(PRODUCT_COLUMNS)
+    .eq("merchant_id", auth.merchant.id)
     .eq("is_active", true)
     .order("created_at", { ascending: false });
 
@@ -39,24 +25,10 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await requireMerchantForApi();
+  if ("error" in auth) return auth.error;
+
   const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("id")
-    .eq("user_id", user.id)
-    .single();
-
-  if (!merchant) {
-    return NextResponse.json({ error: "Merchant not found" }, { status: 404 });
-  }
 
   const body = await request.json();
   const parsed = createProductSchema.safeParse(body);
@@ -71,7 +43,7 @@ export async function POST(request: NextRequest) {
   const { data: product, error } = await supabase
     .from("products")
     .insert({
-      merchant_id: merchant.id,
+      merchant_id: auth.merchant.id,
       name: parsed.data.name,
       price: parsed.data.price,
       currency: parsed.data.currency,
