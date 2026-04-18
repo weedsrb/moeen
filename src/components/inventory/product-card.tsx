@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import Image from "next/image";
+import { useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -25,9 +26,15 @@ interface ProductCardProps {
 export function ProductCard({ product, merchantThreshold }: ProductCardProps) {
   const status = getStockStatus(product, merchantThreshold);
   const available = getAvailableQuantity(product);
+  const href = `/inventory/${product.id}`;
+  const router = useRouter();
 
   return (
-    <Link href={`/inventory/${product.id}`}>
+    <Link
+      href={href}
+      onMouseEnter={() => router.prefetch(href)}
+      onFocus={() => router.prefetch(href)}
+    >
       <Card
         className={cn(
           "transition-colors hover:border-foreground/20 cursor-pointer",

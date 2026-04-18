@@ -1,10 +1,15 @@
 "use client";
 
 import { useState, useMemo } from "react";
+import dynamic from "next/dynamic";
 import { Package } from "lucide-react";
 import { ProductGrid } from "./product-grid";
 import { ProductTable } from "./product-table";
-import { ProductForm } from "./product-form";
+
+const ProductForm = dynamic(
+  () => import("./product-form").then((m) => m.ProductForm),
+  { ssr: false, loading: () => null },
+);
 import {
   InventoryToolbar,
   type SortOption,

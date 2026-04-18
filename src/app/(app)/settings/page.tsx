@@ -1,12 +1,30 @@
+import dynamic from "next/dynamic";
 import { createClient } from "@/lib/supabase/server";
 import { PageTransition } from "@/components/layout/page-transition";
 import { requireMerchant } from "@/lib/auth/require-merchant";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { WhatsAppConnection } from "@/components/settings/whatsapp-connection";
 import { SignOutButton } from "@/components/settings/sign-out-button";
-import { AIBehaviorSettings } from "@/components/settings/ai-behavior-settings";
-import { AIPersonaSettings } from "@/components/settings/ai-persona-settings";
-import { AIFAQSettings } from "@/components/settings/ai-faq-settings";
+
+const WhatsAppConnection = dynamic(() =>
+  import("@/components/settings/whatsapp-connection").then((m) => ({
+    default: m.WhatsAppConnection,
+  })),
+);
+const AIBehaviorSettings = dynamic(() =>
+  import("@/components/settings/ai-behavior-settings").then((m) => ({
+    default: m.AIBehaviorSettings,
+  })),
+);
+const AIPersonaSettings = dynamic(() =>
+  import("@/components/settings/ai-persona-settings").then((m) => ({
+    default: m.AIPersonaSettings,
+  })),
+);
+const AIFAQSettings = dynamic(() =>
+  import("@/components/settings/ai-faq-settings").then((m) => ({
+    default: m.AIFAQSettings,
+  })),
+);
 
 export default async function SettingsPage() {
   const { merchant } = await requireMerchant();

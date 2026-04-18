@@ -1,10 +1,18 @@
 import { cn } from "@/lib/utils"
 
-function Skeleton({ className, ...props }: React.ComponentProps<"div">) {
+type SkeletonProps = React.ComponentProps<"div"> & {
+  variant?: "pulse" | "shimmer"
+}
+
+function Skeleton({ className, variant = "pulse", ...props }: SkeletonProps) {
   return (
     <div
       data-slot="skeleton"
-      className={cn("animate-pulse rounded-md bg-muted", className)}
+      className={cn(
+        "rounded-md",
+        variant === "shimmer" ? "skeleton-shimmer" : "animate-pulse bg-muted",
+        className,
+      )}
       {...props}
     />
   )

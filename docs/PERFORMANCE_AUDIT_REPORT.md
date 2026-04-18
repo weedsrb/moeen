@@ -304,3 +304,255 @@ This report is complete. Outstanding items for later phases (not gaps in Phase 0
 | 3 | Perceived (per-route `loading.tsx`, shimmer, `useOptimistic`, hover prefetch) | 8 new `loading.tsx`, `globals.css` |
 | 4 | Supabase (migration 009, dashboard_metrics RPC, cursor pagination hook + wiring) | new migration, new hook, list pages |
 | 5 | Validation (Lighthouse re-run, design diff, slow-3G test, realtime smoke test) | this report + manual |
+
+---
+
+## Appendix K — Post-Phase-2 baseline (2026-04-17)
+
+Captured after Phases 1 and 2 landed on `performance-rebuild`. Commits in scope: `3f825f9` (phase 1) through `4b589de` (phase 2). Purpose: real numbers before Phase 3 so Phase 5 has a before/after.
+
+### K.1 Build cleanliness
+
+- `npm run typecheck` — exits 0, zero errors.
+- `npm run build` (Turbopack) — exits 0. Emits no route-size table in Next.js 16 Turbopack output; no warnings in the build tail.
+- `ANALYZE=true npx next build --webpack` — exits 0, compile time 12.0s, typecheck 3.6s, 24 static pages generated. Note: Next.js 16 webpack output **also omits the legacy per-route JS size table**, so route totals must be derived from the chunk filesystem (K.2).
+
+Deprecation notes carried forward:
+- Turbopack `middleware` → `proxy` rename (informational; `src/middleware.ts` was deleted in Phase 1, so nothing to migrate).
+
+### K.2 Route-level client JS (raw, uncompressed, from `.next/static/chunks/app/**`)
+
+These are the **per-route page chunks only** (what's added on top of the shared vendor chunks in K.3):
+
+| Route | Page chunk (bytes) | Notes |
+|-------|--------------------|-------|
+| `/` | 29,764 | Landing. Includes dynamic-import stubs for GSAP. |
+| `(app)` layout | 14,822 | Loaded on every app route (sidebar, topbar, mobile nav, providers). |
+| `/settings` | 34,401 | **Heaviest app page.** Still eagerly imports AI settings panels. |
+| `/inventory/[id]` | 19,440 | Product detail + stock adjustment dialog. |
+| `/inventory` | 16,526 | Inventory toolbar + grid/table + `next/image`. |
+| `/conversations` | 14,701 | Shell only — `ChatThread` + `ReplyInput` are already dynamic. |
+| `/login` | 13,514 | Auth form. |
+| `/signup` | 14,599 | Auth form. |
+| `/onboarding` | 10,507 | Business-basics form. |
+| `/dashboard` | 6,347 | Server component; only client JS is inventory alerts + KPI cards. |
+| `/flags` | 862 | Placeholder — no interactive client code yet. |
+| `/orders` | 662 | Placeholder (Phase 5 deferred). |
+| `/orders/[id]` | 277 | Placeholder only. |
+
+`/settings` is the only app page that's unexpectedly large — Phase 2 step 2.6 planned to dynamically import its AI panels (`WhatsAppConnection`, `AIBehaviorSettings`, `AIPersonaSettings`, `AIFAQSettings`) and that's a confirmed Phase 2 gap.
+
+### K.3 Shared vendor chunks (loaded with every route)
+
+`rootMainFiles` per `.next/build-manifest.json`:
+
+| Chunk | Size (bytes) | Package ID (matched strings) |
+|-------|-------------:|------------------------------|
+| `framework-*.js` | 189,700 | React core |
+| `4bd1b696-*.js` | 199,870 | `react-dom` (client runtime + minified error stub) |
+| `3794-*.js` | 221,958 | `react-dom` (reconciler + Fragment / Suspense / Portal / flushSync / preload APIs) |
+| `main-d18698cd-*.js` | 137,001 | Next.js app-router runtime |
+| `main-app-*.js` | 529 | entry stub |
+| `webpack-*.js` | 3,941 | webpack runtime |
+| `polyfills-*.js` | 112,594 | legacy-browser polyfills (not loaded by modern Chrome) |
+
+**Shared baseline on a modern browser ≈ 753 KB raw** (framework + react-dom ×2 + main + webpack + entry, excluding polyfills). Gzip typically reduces to ~220–250 KB over the wire.
+
+### K.4 Large shared vendor chunks (loaded on demand by routes that need them)
+
+| Chunk | Size | Package(s) | Which routes pull it |
+|-------|-----:|------------|----------------------|
+| `3655-*.js` | **223,570** | `@supabase/supabase-js` + realtime + `auth-helpers` + `phoenix` + `ws` | every (app) route, `/login`, `/signup`, `/conversations` |
+| `9398-*.js` | **119,341** | `framer-motion` (match: `motionValue`) | every (app) route — because `PageTransition` still uses `motion.div` |
+| `3198-*.js` | 13,704 | (ui / misc) | various |
+| `5706-*.js` | 27,499 | (ui / misc) | various |
+| `8500-*.js` | 8,734 | (ui / misc) | various |
+
+**Supabase is the single largest client dependency at 223 KB.** It is unavoidable for (app) routes, but it's currently in the login/signup path too via `src/lib/supabase/client.ts`. That's expected — the login form needs the browser client.
+
+**Framer Motion still contaminates every (app) route** at 119 KB because of `src/components/layout/page-transition.tsx`. This was a Phase 2.6 task but wasn't completed. Phase 3 should absorb it.
+
+### K.5 Lazy-loaded (async) chunks — landing-only
+
+| Chunk | Size | Package |
+|-------|-----:|---------|
+| `c15bf2b0-*.js` | 51,699 | GSAP core |
+| `3018-*.js` | 43,025 | GSAP + ScrollTrigger |
+| `5911-*.js` | 19,441 | GSAP (plugin / helper) |
+| **Total GSAP** | **~114 KB** | loaded only after `loadGsap()` resolves on scroll |
+
+✓ **Confirmed: GSAP is not in any `rootMainFiles` chunk.** The Phase 2 lazy-load via `src/lib/animations/gsap.ts` works.
+
+### K.6 Client-chunk package presence (greppable markers)
+
+| Package | Marker searched | In client bundle? | Expected? |
+|---------|-----------------|-------------------|-----------|
+| `@supabase/supabase-js` | `createBrowserClient`, `supabase-js`, `phoenix` | ✓ chunk 3655 | ✓ |
+| `framer-motion` | `motionValue`, `framerMotion` | ✓ chunk 9398 | ⚠ leaks into (app) routes via PageTransition |
+| `gsap` | `gsap`, `ScrollTrigger` | ✓ async chunks only | ✓ lazy-load working |
+| `@google/generative-ai` | `GoogleGenerativeAI`, `generativelanguage` | ✗ **not found anywhere** | ✓ **server-only confirmed** |
+| `lucide-react` | `lucide-react`, `lucide_react` | ✗ not found | ✓ per-icon tree-shaking via `optimizePackageImports` |
+| `@base-ui/react` | `@base-ui`, `base_ui` | ✗ not found | ✓ per-component tree-shaking |
+
+### K.7 Analyzer reports on disk
+
+- `.next/analyze/client.html` — 619 KB, full client treemap
+- `.next/analyze/edge.html` — 275 KB, edge runtime (minimal)
+- `.next/analyze/nodejs.html` — 771 KB, but printed "No bundles were parsed. Analyzer will show only original module sizes from stats file." Useful only for package-list, not for chunked-view.
+
+Open `client.html` in a browser for the interactive treemap.
+
+### K.8 Phase 3 readiness checklist
+
+| Item | Status |
+|------|--------|
+| Shimmer keyframe in `src/app/globals.css` | ✗ absent — Phase 3.1 adds it |
+| Per-route `loading.tsx` for 6 app routes (dashboard, orders, inventory, flags, conversations, settings) | ✓ present (scope creep from Phase 1) — contents use Tailwind `animate-pulse`, Phase 3 upgrades them to shimmer |
+| `loading.tsx` for `orders/[id]` | ✗ missing |
+| `loading.tsx` for `inventory/[id]` | ✗ missing |
+| `useOptimistic` usage (orders status, flag resolution) | ✗ none in codebase (grep `src`) |
+| Hover prefetch (`router.prefetch` + `onMouseEnter`) on product cards / order rows | ✗ none in codebase |
+| Skeleton component has shimmer animation | ✗ uses `animate-pulse` (Tailwind opacity pulse) — Phase 3 swaps to gradient shimmer |
+
+### K.9 Phase 2 gaps — carry into Phase 3 or backlog
+
+Confirmed gaps vs the Phase 2 plan at `/Users/waleedsrb/.claude/plans/mo-een-performance-glistening-perlis.md`:
+
+1. **Landing dynamic imports** (`src/app/page.tsx:4-8`) — below-the-fold sections still static. Phase 2.5. Est. saving: modest — initial landing HTML already fast; gains mostly below-the-fold hydration.
+2. **`PageTransition` → CSS fade** (`src/components/layout/page-transition.tsx`) — still uses `motion.div`. Phase 2.6. **Impact: 119 KB Framer Motion chunk stays in every (app) route.** This is the single biggest remaining Phase 2 win.
+3. **Inventory form dynamic imports** (`src/components/inventory/inventory-content.tsx`) — `ProductForm`, `StockAdjustmentDialog` static. Phase 2.6. Est. saving: ~5–10 KB on `/inventory` initial load.
+4. **Sub-route `loading.tsx`** — `orders/[id]`, `inventory/[id]` missing. Phase 3.1.
+5. **DM Sans font** — no explicit `preload: true` / `adjustFontFallback` (defaults are acceptable; note only).
+
+**Recommendation:** absorb items 1–3 into a `perf(phase-2): cleanup` commit at the start of Phase 3, or fold into Phase 3's own commits. Item 4 is already Phase 3 scope.
+
+### K.10 Lighthouse — desktop preset (2026-04-17, localhost, production build)
+
+| Route (requested) | Route (measured) | Performance | LCP | CLS | TBT | Speed Index | FCP | Total bytes | Script bytes |
+|-------------------|------------------|------------:|----:|----:|----:|------------:|----:|------------:|-------------:|
+| `/` | `/` | **99** | 0.8 s | 0 | 0 ms | 0.9 s | 0.5 s | 467 KiB | 225 KiB |
+| `/dashboard` | `/login` ⚠ | 100 | 0.7 s | 0 | 0 ms | 0.4 s | 0.3 s | 322 KiB | 235 KiB |
+| `/orders` | `/login` ⚠ | 100 | 0.6 s | 0 | 0 ms | 0.3 s | 0.3 s | 322 KiB | 235 KiB |
+| `/inventory` | `/login` ⚠ | 100 | 0.6 s | 0 | 0 ms | 0.3 s | 0.3 s | 323 KiB | 235 KiB |
+| `/flags` | `/login` ⚠ | 100 | 0.6 s | 0 | 0 ms | 0.3 s | 0.3 s | 322 KiB | 235 KiB |
+
+INP is not reported on first-load Lighthouse runs (it needs real interactions; `/` would need a manual INP harness or field data).
+
+**⚠ Coverage gap:** four of the five runs landed on `/login`. Removing middleware in Phase 1 means `(app)/layout.tsx` runs `auth.getUser()` → `redirect("/login")` per-page when there's no session. Lighthouse sees the final rendered URL after redirect, so the dashboard/orders/inventory/flags runs above are effectively `/login` measured four times (identical numbers confirm this).
+
+**What this still tells us:**
+- Landing `/` is excellent: Perf 99, LCP 0.8 s, CLS 0, TBT 0 ms. 467 KiB total, 225 KiB of script. Phase 2's GSAP lazy-load is paying off — ~114 KB of GSAP chunks are _not_ in this 225 KiB.
+- Login `/login` is excellent: Perf 100, LCP 0.6 s, 322 KiB total, 235 KiB of script. Supabase browser client is loaded (~223 KB raw → ~70–80 KB gzipped), matching expectations.
+- Gzip compression factor: raw shared-vendor ~753 KB → ~230 KiB on the wire, ≈3.3× — consistent with the composition in K.3.
+
+**To cover the authenticated app routes**, use the dev-only signin endpoint at `src/app/api/dev/lighthouse-signin/route.ts`. Only responds when `LIGHTHOUSE_BYPASS_ENABLED=true`; returns 404 otherwise.
+
+Setup:
+```bash
+# .env.local — add temporarily
+LIGHTHOUSE_BYPASS_ENABLED=true
+LIGHTHOUSE_TEST_EMAIL=you@example.com
+LIGHTHOUSE_TEST_PASSWORD=<existing password for a real merchant account>
+```
+
+Run:
+```bash
+# Terminal 1 — production build that picks up the env vars
+npm run build && npm run start
+
+# Terminal 2 — each route signs in first, then gets redirected into the app
+npx lighthouse 'http://localhost:3000/api/dev/lighthouse-signin?next=/dashboard'     --view --preset=desktop --only-categories=performance
+npx lighthouse 'http://localhost:3000/api/dev/lighthouse-signin?next=/orders'        --view --preset=desktop --only-categories=performance
+npx lighthouse 'http://localhost:3000/api/dev/lighthouse-signin?next=/inventory'     --view --preset=desktop --only-categories=performance
+npx lighthouse 'http://localhost:3000/api/dev/lighthouse-signin?next=/conversations' --view --preset=desktop --only-categories=performance
+npx lighthouse 'http://localhost:3000/api/dev/lighthouse-signin?next=/flags'         --view --preset=desktop --only-categories=performance
+npx lighthouse 'http://localhost:3000/api/dev/lighthouse-signin?next=/settings'      --view --preset=desktop --only-categories=performance
+```
+
+Lighthouse sees the redirect chain `signin → target` as a single navigation; the `finalDisplayedUrl` in each report will be the target path. Real RLS-scoped data loads as for a signed-in merchant.
+
+**After capturing:** remove the three env vars from `.env.local` and restart. The endpoint then returns 404.
+
+Authenticated-route numbers captured 2026-04-17 via the bypass endpoint. Re-capture after Phase 3 for before/after deltas.
+
+| Route | Performance | LCP | CLS | TBT | Speed Index | FCP | Total | Script |
+|-------|------------:|----:|----:|----:|------------:|----:|------:|-------:|
+| `/dashboard` | **91** | 0.9 s | 0 | 0 ms | **3.6 s** ⚠ | 0.4 s | 470 KiB | 329 KiB |
+| `/orders` | 97 | 0.9 s | 0 | 0 ms | 1.6 s | 0.3 s | 431 KiB | 328 KiB |
+| `/inventory` | 98 | 0.9 s | 0 | 0 ms | 1.4 s | 0.3 s | 467 KiB | **363 KiB** |
+| `/conversations` | 98 | 0.9 s | 0 | 0 ms | 1.5 s | 0.4 s | 472 KiB | 335 KiB |
+| `/flags` | 97 | 0.9 s | 0 | 0 ms | 1.6 s | 0.3 s | 432 KiB | 328 KiB |
+| `/settings` | 96 | 1.0 s | 0 | 0 ms | 1.8 s | 0.3 s | 497 KiB | **359 KiB** |
+
+**Observations:**
+- **LCP 0.9–1.0 s, CLS 0, TBT 0 ms across the board.** On localhost with a fast machine these numbers are excellent.
+- **`/dashboard` Speed Index outlier at 3.6 s** despite LCP 0.9 s. This is the 10 parallel Supabase count queries + inventory alerts pattern — pixels paint fast but the full viewport keeps redrawing as each count resolves. The Phase 4 `dashboard_metrics` RPC (single round-trip) targets this directly.
+- **`/inventory` has the heaviest script at 363 KiB** — matches the K.2 finding that ProductForm/StockAdjustmentDialog are not dynamically imported.
+- **`/settings` next at 359 KiB** — matches the K.2 finding that AI panels are not dynamically imported.
+- **`/orders` and `/flags` at 328 KiB** are the floor for an authenticated (app) route — this is the layout + PageTransition (Framer Motion) + Supabase vendor chunk + (app) shell. Any future `(app)` route starts here.
+- **Delta vs `/login` (K.10 row 2, 235 KiB script): +93 KiB** per (app) route. That's the (app) layout chunk + Framer Motion. Phase 3's PageTransition→CSS cleanup should shave ~35–40 KiB gzipped from this floor.
+
+### K.11 Issues surfaced by the baseline
+
+1. **`PageTransition` Framer Motion leak** (K.4). Highest-impact Phase 2 cleanup. 119 KB on every (app) route.
+2. **`/settings` is the heaviest app page chunk at 34 KB** (K.2) because its AI panels import eagerly. `next/dynamic` would help.
+3. **Two react-dom-ish chunks** (199 KB + 222 KB, K.3) — both are in `rootMainFiles`. Not a bug; Next 16 + webpack splits react-dom into reconciler + client runtime. No action.
+4. **No `app-build-manifest.json` in Next.js 16 webpack output** — per-route chunk maps must be inferred from the filesystem. Phase 5 re-measure should use the same chunk-listing approach for consistency.
+5. **Lucide + Base-UI don't appear by name in chunks** — confirms `optimizePackageImports` is working. No action.
+6. **Gemini SDK is not in any client chunk** — confirms server-only boundary holds. No action.
+
+---
+
+## Appendix K.12 — Post-Phase-3 Lighthouse (2026-04-17)
+
+Captured after Phase 3 landed on `performance-rebuild`. Same command loop as K.10 (authenticated routes via `src/app/api/dev/lighthouse-signin`), same machine, same production build.
+
+**Phase 3 changes that should move these numbers:** `PageTransition` → CSS fade (Framer Motion removed from every (app) route), landing below-the-fold `next/dynamic`, inventory `ProductForm` + settings AI panels `next/dynamic`, shimmer skeletons + layout-exact `inventory/[id]/loading.tsx`, `<Suspense>` around dashboard inventory alerts, `useOptimistic` on flag resolution, hover `router.prefetch` on product cards.
+
+### K.12.1 Results
+
+| Route | Performance | LCP | CLS | TBT | Speed Index | FCP | Total | Script |
+|-------|------------:|----:|----:|----:|------------:|----:|------:|-------:|
+| `/dashboard` | **92** | 0.9 s | 0 | 0 ms | 2.7 s | 0.3 s | 432 KiB | 291 KiB |
+| `/orders` | 99 | 0.6 s | 0 | 0 ms | 1.3 s | 0.3 s | 391 KiB | 289 KiB |
+| `/inventory` | 99 | 0.7 s | 0 | 0 ms | 1.3 s | 0.3 s | 430 KiB | 325 KiB |
+| `/conversations` | 99 | 0.6 s | 0 | 0 ms | 1.2 s | 0.3 s | 433 KiB | 297 KiB |
+| `/flags` | 99 | 0.6 s | 0 | 0 ms | 1.2 s | 0.3 s | 393 KiB | 291 KiB |
+| `/settings` | 98 | 0.7 s | 0 | 0 ms | 1.4 s | 0.3 s | 457 KiB | 319 KiB |
+
+### K.12.2 Deltas vs K.10 (Post-Phase-2)
+
+| Route | Perf Δ | Script Δ | Total Δ | Speed Index Δ | LCP Δ |
+|-------|-------:|---------:|--------:|--------------:|------:|
+| `/dashboard` | **+1** (91→92) | **−38 KiB** (329→291) | **−38 KiB** (470→432) | **−0.9 s** (3.6→2.7) | 0.0 s |
+| `/orders` | +2 (97→99) | −39 KiB (328→289) | −40 KiB (431→391) | −0.3 s (1.6→1.3) | −0.3 s |
+| `/inventory` | +1 (98→99) | **−38 KiB** (363→325) | −37 KiB (467→430) | −0.1 s (1.4→1.3) | −0.2 s |
+| `/conversations` | +1 (98→99) | −38 KiB (335→297) | −39 KiB (472→433) | −0.3 s (1.5→1.2) | −0.3 s |
+| `/flags` | +2 (97→99) | −37 KiB (328→291) | −39 KiB (432→393) | −0.4 s (1.6→1.2) | −0.3 s |
+| `/settings` | +2 (96→98) | **−40 KiB** (359→319) | −40 KiB (497→457) | −0.4 s (1.8→1.4) | −0.3 s |
+
+### K.12.3 Observations
+
+- **Framer Motion removal landed.** The ~37–40 KiB script drop on every (app) route matches the gzipped weight of the `motion` primitives chunk (K.4: 119 KB raw → ~35–40 KiB gzipped). `rg framer-motion src` confirms zero source imports.
+- **Every (app) route now scores 98–99 Performance**, up from the 91–98 range. The authenticated (app) script floor fell from ~328 KiB (K.10 `/orders`) to ~289 KiB (K.12 `/orders`) — a new baseline for every future (app) route.
+- **`/dashboard` Speed Index: 3.6 s → 2.7 s (−0.9 s).** Two factors: (1) less JS parse/execute once Framer Motion is gone; (2) `<Suspense>` around `InventoryAlertsAsync` lets the KPI grid + Today's Activity paint before the products query resolves, so the viewport stops redrawing earlier. The outlier is gone.
+- **`/settings` script: 359 KiB → 319 KiB (−40 KiB).** Slightly bigger than the Framer Motion baseline drop — the additional savings come from `next/dynamic` on the four AI settings panels, which now split into lazy chunks rather than bundling into the settings page chunk.
+- **`/inventory` script: 363 KiB → 325 KiB (−38 KiB).** `ProductForm` dynamic import deferred its ~5–10 KiB to an async chunk; the rest is the Framer Motion drop.
+- **LCP improved 0.2–0.3 s on 5 of 6 routes** (dashboard flat at 0.9 s because LCP there is a text node, not a layout-sensitive element).
+- **CLS 0, TBT 0 ms everywhere** — the shimmer loaders and streaming Suspense did not introduce jank, as intended.
+
+### K.12.4 Remaining targets for Phase 4/5
+
+1. **`/dashboard` Performance still 92** — the lowest of the six. Speed Index is 2.7 s because the 10 parallel Supabase count queries each trigger a micro-repaint. Phase 4's `dashboard_metrics` RPC collapses this into a single round trip. Expected SI improvement: further 1.0–1.5 s.
+2. **`/inventory` script still 325 KiB** — `StockAdjustmentDialog` is already dynamic in `product-detail.tsx`, but the main inventory page still carries the toolbar + Base-UI Select + product card grid. Phase 4 cursor pagination will reduce initial render cost, not chunk size.
+3. **`/settings` script still 319 KiB** — 30 KiB above the `/flags` floor. The remaining delta is the Base-UI form primitives (Tabs, Switch) used by the dynamic panels, plus Zod v4 validation wired into the AI behavior form.
+4. **Lighthouse-visible INP** — still not reported on cold navigations; field data or a scripted interaction harness would be the next step if we want INP numbers.
+
+### K.12.5 Raw artifacts
+
+- `localhost_2026-04-17_21-43-16.report.html` — `/dashboard`
+- `localhost_2026-04-17_21-43-35.report.html` — `/orders`
+- `localhost_2026-04-17_21-43-49.report.html` — `/inventory`
+- `localhost_2026-04-17_21-44-03.report.html` — `/conversations`
+- `localhost_2026-04-17_21-44-17.report.html` — `/flags`
+- `localhost_2026-04-17_21-44-30.report.html` — `/settings`
