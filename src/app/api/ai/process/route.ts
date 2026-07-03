@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { processInboundMessage } from "@/lib/ai/process";
+import { getMerchantCredentials } from "@/lib/messaging/credentials";
 import { z } from "zod/v4";
 import { requireMerchantForApi } from "@/lib/auth/require-merchant";
 
@@ -42,7 +43,7 @@ export async function POST(request: NextRequest) {
 
   const { data: conversation } = await admin
     .from("conversations")
-    .select("id, platform_chat_id, customer_id")
+    .select("id, platform, platform_chat_id, customer_id")
     .eq("id", message.conversation_id)
     .single();
 
@@ -53,15 +54,15 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { data: settings } = await admin
-    .from("merchant_settings")
-    .select("whatsapp_phone_number_id, whatsapp_access_token")
-    .eq("merchant_id", merchant.id)
-    .single();
+  const credentials = await getMerchantCredentials(
+    admin,
+    merchant.id,
+    conversation.platform
+  );
 
-  if (!settings?.whatsapp_phone_number_id || !settings?.whatsapp_access_token) {
+  if (!credentials) {
     return NextResponse.json(
-      { error: "WhatsApp not connected" },
+      { error: `${conversation.platform} not connected` },
       { status: 400 }
     );
   }
@@ -78,8 +79,8 @@ export async function POST(request: NextRequest) {
     customerId: conversation.customer_id,
     content: message.content,
     chatId: conversation.platform_chat_id,
-    whatsappPhoneNumberId: settings.whatsapp_phone_number_id,
-    whatsappAccessToken: settings.whatsapp_access_token,
+    platform: conversation.platform,
+    credentials,
   });
 
   return NextResponse.json({ success: true });

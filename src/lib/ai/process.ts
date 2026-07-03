@@ -1,5 +1,5 @@
 import { createAdminClient } from "@/lib/supabase/admin";
-import { WhatsAppProvider } from "@/lib/messaging/whatsapp";
+import { getProvider, isWindowExpiredError } from "@/lib/messaging";
 import { shouldProcess } from "./regex-filter";
 import { assembleContext } from "./context";
 import { callGemini } from "./gemini";
@@ -23,8 +23,8 @@ export async function processInboundMessage(
     customerId,
     content,
     chatId,
-    whatsappPhoneNumberId,
-    whatsappAccessToken,
+    platform,
+    credentials,
   } = input;
 
   const supabase = createAdminClient();
@@ -144,9 +144,10 @@ export async function processInboundMessage(
           supabase,
           merchantId,
           conversationId,
+          messageId,
           chatId,
-          whatsappPhoneNumberId,
-          whatsappAccessToken,
+          platform,
+          credentials,
           geminiResponse.answer
         );
       } else {
@@ -194,12 +195,13 @@ export async function processInboundMessage(
           supabase,
           merchantId,
           conversationId,
+          messageId,
           chatId,
-          whatsappPhoneNumberId,
-          whatsappAccessToken,
+          platform,
+          credentials,
           geminiResponse.clarifying_question
         );
-        console.log(`${tag} | action | clarifying question sent via WhatsApp`);
+        console.log(`${tag} | action | clarifying question sent via ${platform}`);
       }
       return;
     }
@@ -256,9 +258,10 @@ export async function processInboundMessage(
       supabase,
       merchantId,
       conversationId,
+      messageId,
       chatId,
-      whatsappPhoneNumberId,
-      whatsappAccessToken,
+      platform,
+      credentials,
       settings.handoffMessage
     );
     console.log(`${tag} | action | Case D → order ${orderNumber} + flag + handoff sent`);
@@ -268,22 +271,47 @@ export async function processInboundMessage(
 }
 
 /**
- * Send a message from the AI to the customer via WhatsApp,
- * and save it to the messages table.
+ * Send a message from the AI to the customer via the conversation's channel,
+ * and save it to the messages table. AI sends never use the HUMAN_AGENT tag.
+ *
+ * If the send is rejected because the platform's messaging window has expired
+ * (e.g. Instagram's 24h window), a `customer_waiting` flag is raised instead
+ * of silently swallowing the error.
  */
 async function sendAIMessage(
   supabase: ReturnType<typeof createAdminClient>,
   merchantId: string,
   conversationId: string,
+  messageId: string,
   chatId: string,
-  phoneNumberId: string,
-  accessToken: string,
+  platform: string,
+  credentials: Record<string, string>,
   text: string
 ): Promise<void> {
-  console.log(`[AI Pipeline] sendAI | to=${chatId} | "${text.slice(0, 100)}"`);
-  const provider = new WhatsAppProvider(phoneNumberId, accessToken);
+  console.log(`[AI Pipeline] sendAI | to=${chatId} via ${platform} | "${text.slice(0, 100)}"`);
+  const provider = getProvider(platform, credentials);
   const result = await provider.sendMessage(chatId, text);
   console.log(`[AI Pipeline] sendAI | success=${result.success}, messageId=${result.messageId ?? "none"}`);
+
+  if (!result.success) {
+    if (isWindowExpiredError(result.error)) {
+      console.log(`[AI Pipeline] sendAI | window expired → flag customer_waiting`);
+      await supabase.from("flags").insert({
+        merchant_id: merchantId,
+        conversation_id: conversationId,
+        message_id: messageId,
+        priority: "medium",
+        category: "customer_waiting",
+        title: "Reply blocked — messaging window expired",
+        description: `The AI could not reply because the messaging window has closed. ${result.error ?? ""}`.trim(),
+        recommended_action:
+          "Reply to the customer manually from a channel that permits it.",
+      });
+    } else {
+      console.error(`[AI Pipeline] sendAI | send failed: ${result.error ?? "unknown"}`);
+    }
+    return;
+  }
 
   // Save outbound AI message to DB
   await supabase.from("messages").insert({

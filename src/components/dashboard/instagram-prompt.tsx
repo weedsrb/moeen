@@ -4,25 +4,25 @@ import { useState } from "react";
 import Link from "next/link";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { MessageSquare, X } from "lucide-react";
+import { MessageCircle, X } from "lucide-react";
 
-export function WhatsAppPrompt() {
+export function InstagramPrompt() {
   const [dismissed, setDismissed] = useState(false);
 
   if (dismissed) return null;
 
   return (
-    <Card className="border-green-500/30 bg-green-500/5">
+    <Card className="border-pink-500/30 bg-pink-500/5">
       <CardContent className="flex items-center gap-4 py-4">
-        <div className="h-10 w-10 rounded-full bg-green-500/10 text-green-500 flex items-center justify-center shrink-0">
-          <MessageSquare className="h-5 w-5" />
+        <div className="h-10 w-10 rounded-full bg-gradient-to-br from-purple-500 via-pink-500 to-orange-400 text-white flex items-center justify-center shrink-0">
+          <MessageCircle className="h-5 w-5" />
         </div>
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium">
-            Connect your WhatsApp Business number
+            Connect your Instagram account
           </p>
           <p className="text-xs text-muted-foreground">
-            Start receiving customer messages on your dashboard.
+            Receive customer DMs on your dashboard and let AI extract orders.
           </p>
         </div>
         <Link href="/settings">

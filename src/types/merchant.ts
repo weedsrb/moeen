@@ -22,6 +22,11 @@ export interface MerchantSettings {
   whatsapp_business_account_id: string | null;
   whatsapp_display_phone: string | null;
   whatsapp_connected: boolean;
+  instagram_connected: boolean;
+  instagram_user_id: string | null;
+  instagram_username: string | null;
+  instagram_access_token: string | null;
+  instagram_token_expires_at: string | null;
   ai_confidence_threshold: number;
   ai_auto_clarify: boolean;
   ai_handoff_message: string;

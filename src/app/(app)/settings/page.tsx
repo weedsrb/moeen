@@ -5,9 +5,9 @@ import { requireMerchant } from "@/lib/auth/require-merchant";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SignOutButton } from "@/components/settings/sign-out-button";
 
-const WhatsAppConnection = dynamic(() =>
-  import("@/components/settings/whatsapp-connection").then((m) => ({
-    default: m.WhatsAppConnection,
+const InstagramConnection = dynamic(() =>
+  import("@/components/settings/instagram-connection").then((m) => ({
+    default: m.InstagramConnection,
   })),
 );
 const AIBehaviorSettings = dynamic(() =>
@@ -33,7 +33,7 @@ export default async function SettingsPage() {
   const [settingsResult, faqResult] = await Promise.all([
     supabase
       .from("merchant_settings")
-      .select("whatsapp_connected, whatsapp_display_phone, ai_confidence_threshold, ai_auto_clarify, ai_handoff_message, ai_persona_name, ai_tone, ai_greeting, ai_business_context, ai_custom_instructions, ai_response_language, ai_auto_acknowledge, ai_acknowledge_template")
+      .select("instagram_connected, instagram_username, ai_confidence_threshold, ai_auto_clarify, ai_handoff_message, ai_persona_name, ai_tone, ai_greeting, ai_business_context, ai_custom_instructions, ai_response_language, ai_auto_acknowledge, ai_acknowledge_template")
       .eq("merchant_id", merchant.id)
       .single(),
 
@@ -78,10 +78,10 @@ export default async function SettingsPage() {
           </CardContent>
         </Card>
 
-        {/* WhatsApp */}
-        <WhatsAppConnection
-          initialConnected={s?.whatsapp_connected ?? false}
-          initialPhoneNumberId={s?.whatsapp_display_phone ?? null}
+        {/* Instagram (primary channel) */}
+        <InstagramConnection
+          initialConnected={s?.instagram_connected ?? false}
+          initialUsername={s?.instagram_username ?? null}
         />
 
         {/* AI Behavior */}

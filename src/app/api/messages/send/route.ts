@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { WhatsAppProvider } from "@/lib/messaging/whatsapp";
+import { getProvider } from "@/lib/messaging";
+import { InstagramProvider } from "@/lib/messaging/instagram";
+import { getMerchantCredentials } from "@/lib/messaging/credentials";
 import { sendMessageSchema } from "@/lib/validations/messaging";
 import { requireMerchantForApi } from "@/lib/auth/require-merchant";
 
@@ -35,40 +37,34 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  if (conversation.platform !== "whatsapp") {
+  const credentials = await getMerchantCredentials(
+    supabase,
+    merchant.id,
+    conversation.platform
+  );
+
+  if (!credentials) {
     return NextResponse.json(
-      { error: "Only WhatsApp conversations are supported" },
+      { error: `${conversation.platform} not connected` },
       { status: 400 }
     );
   }
 
-  const { data: settings } = await supabase
-    .from("merchant_settings")
-    .select(
-      "whatsapp_phone_number_id, whatsapp_access_token, whatsapp_connected"
-    )
-    .eq("merchant_id", merchant.id)
-    .single();
+  const provider = getProvider(conversation.platform, credentials);
 
-  if (
-    !settings?.whatsapp_connected ||
-    !settings.whatsapp_phone_number_id ||
-    !settings.whatsapp_access_token
-  ) {
-    return NextResponse.json(
-      { error: "WhatsApp not connected" },
-      { status: 400 }
-    );
-  }
-
-  const provider = new WhatsAppProvider(
-    settings.whatsapp_phone_number_id,
-    settings.whatsapp_access_token
-  );
-  const result = await provider.sendMessage(
-    conversation.platform_chat_id,
-    parsed.data.content
-  );
+  // Merchant (human) replies may use the HUMAN_AGENT tag to send within
+  // Instagram's extended 7-day window. AI sends never use this tag.
+  const result =
+    provider instanceof InstagramProvider
+      ? await provider.sendMessage(
+          conversation.platform_chat_id,
+          parsed.data.content,
+          { humanAgentTag: true }
+        )
+      : await provider.sendMessage(
+          conversation.platform_chat_id,
+          parsed.data.content
+        );
 
   if (!result.success) {
     return NextResponse.json(
