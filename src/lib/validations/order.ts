@@ -1,6 +1,7 @@
 import { z } from "zod/v4";
 
 export const orderStatusSchema = z.enum([
+  "collecting",
   "ai_proposal",
   "incoming",
   "pending",

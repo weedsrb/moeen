@@ -21,6 +21,7 @@ export function OrderStatusActions({
   const [error, setError] = useState<string | null>(null);
 
   const isProposal = order.status === "ai_proposal";
+  const isCollecting = order.status === "collecting";
 
   const nextStatuses = ORDER_ALLOWED_TRANSITIONS[order.status]
     .filter((status) => !(order.status === "pending" && status === "incoming"))
@@ -80,9 +81,11 @@ export function OrderStatusActions({
                 ? "Confirm proposal"
                 : isProposal && status === "cancelled"
                   ? "Reject proposal"
-                  : status === "cancelled"
-                    ? "Cancel order"
-                    : ORDER_STATUS_LABELS[status]}
+                  : isCollecting && status === "incoming"
+                    ? "Mark as Incoming"
+                    : status === "cancelled"
+                      ? "Cancel order"
+                      : ORDER_STATUS_LABELS[status]}
           </Button>
         ))}
       </div>
