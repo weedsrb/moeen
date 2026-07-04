@@ -3,22 +3,67 @@ import type { SenderType } from "@/types/message";
 import type { AssembledContext, CompressedProduct } from "./types";
 
 /**
+ * assembleContext's return type, augmented with the conversation's open
+ * `collecting` order so the pipeline can maintain a multi-turn draft without
+ * re-querying. Kept local (extends AssembledContext) so the shared type in
+ * types.ts — owned by the Gemini contract — stays untouched.
+ */
+export interface AssembledContextWithOrder extends AssembledContext {
+  /**
+   * Readable rendering of the in-progress `collecting` order (items, delivery
+   * address, running total) fed to Gemini as ORDER_SO_FAR, or "(no order yet)".
+   */
+  orderSoFar: string;
+  /** True when the conversation has an open `collecting` order. */
+  hasOpenCollectingOrder: boolean;
+  /** The open `collecting` order's id, or null — so the pipeline can upsert /
+   *  promote it without re-querying. */
+  collectingOrderId: string | null;
+}
+
+/** Shape of the open collecting order row (untyped client → cast locally). */
+interface CollectingOrderRow {
+  id: string;
+  delivery_address: string | null;
+  subtotal: number | null;
+  total: number | null;
+  currency: string | null;
+  order_items:
+    | Array<{
+        product_name: string;
+        variant: string | null;
+        quantity: number;
+        unit_price: number;
+        subtotal: number;
+      }>
+    | null;
+}
+
+/**
  * Assemble the full context needed for a Gemini API call:
  * - Conversation history (last 6 messages)
  * - Compressed product catalog
  * - Merchant AI settings (system + merchant layer)
  * - Merchant context string (injected into Gemini prompt)
  * - Last outbound message sender type (for reply-to-AI detection)
+ * - The conversation's open `collecting` order (rendered as ORDER_SO_FAR)
  */
 export async function assembleContext(
   supabase: SupabaseClient,
   merchantId: string,
   conversationId: string,
   messageContent: string
-): Promise<AssembledContext> {
-  // Fetch in parallel: messages, products, settings, business name, FAQ
-  const [messagesResult, productsResult, settingsResult, merchantResult, faqResult] =
-    await Promise.all([
+): Promise<AssembledContextWithOrder> {
+  // Fetch in parallel: messages, products, settings, business name, FAQ, and
+  // the single open collecting order (+ its items) for this conversation.
+  const [
+    messagesResult,
+    productsResult,
+    settingsResult,
+    merchantResult,
+    faqResult,
+    collectingResult,
+  ] = await Promise.all([
       supabase
         .from("messages")
         .select("content, direction, sender_type")
@@ -51,6 +96,18 @@ export async function assembleContext(
         .select("question, answer")
         .eq("merchant_id", merchantId)
         .order("display_order"),
+
+      supabase
+        .from("orders")
+        .select(
+          "id, delivery_address, subtotal, total, currency, order_items(product_name, variant, quantity, unit_price, subtotal)"
+        )
+        .eq("merchant_id", merchantId)
+        .eq("conversation_id", conversationId)
+        .eq("status", "collecting")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
     ]);
 
   // --- Conversation history ---
@@ -129,7 +186,57 @@ export async function assembleContext(
   const faq = faqResult.data ?? [];
   const merchantContext = buildMerchantContext(businessName, settings, faq);
 
-  return { conversationHistory, catalog, settings, merchantContext, lastOutboundSenderType };
+  // --- Open collecting order (the running "order so far") ---
+  const collectingOrder =
+    (collectingResult.data as CollectingOrderRow | null) ?? null;
+  const collectingOrderId = collectingOrder?.id ?? null;
+  const hasOpenCollectingOrder = collectingOrderId !== null;
+  const orderSoFar = collectingOrder
+    ? renderOrderSoFar(collectingOrder, currency)
+    : "(no order yet)";
+
+  return {
+    conversationHistory,
+    catalog,
+    settings,
+    merchantContext,
+    lastOutboundSenderType,
+    orderSoFar,
+    hasOpenCollectingOrder,
+    collectingOrderId,
+  };
+}
+
+/**
+ * Render an open `collecting` order into the plain-text ORDER_SO_FAR block the
+ * Gemini prompt merges the new message into. Lists each line item with quantity,
+ * variant, unit price and subtotal, plus the delivery address and running total.
+ */
+function renderOrderSoFar(
+  order: CollectingOrderRow,
+  fallbackCurrency: string
+): string {
+  const currency = order.currency ?? fallbackCurrency;
+  const items = order.order_items ?? [];
+  const lines: string[] = [];
+
+  if (items.length === 0) {
+    lines.push("Items: (none confirmed yet)");
+  } else {
+    lines.push("Items:");
+    for (const it of items) {
+      const variant = it.variant ? ` (${it.variant})` : "";
+      lines.push(
+        `- ${it.quantity}x ${it.product_name}${variant} @ ${it.unit_price} = ${it.subtotal} ${currency}`
+      );
+    }
+  }
+
+  lines.push(
+    `Delivery address: ${order.delivery_address ?? "(not provided yet)"}`
+  );
+  lines.push(`Running total: ${order.total ?? 0} ${currency}`);
+  return lines.join("\n");
 }
 
 /**

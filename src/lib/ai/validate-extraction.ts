@@ -168,3 +168,91 @@ export function validateExtraction(
     },
   };
 }
+
+// ------------------------------------------------------------
+// Stage-gating helpers
+// ------------------------------------------------------------
+//
+// The conversational stage machine (src/lib/ai/process.ts) must NEVER let the
+// model upgrade an order to "confirmed"/"ready_to_confirm" past what the catalog
+// actually allows. These promote the validator from advisory to stage-gating:
+// they answer, deterministically, "does this order have a HARD availability
+// problem?" and "is it finalizable?".
+//
+// A HARD availability problem is one that makes the order un-fulfillable as
+// stated and therefore MUST force the stage back down to "collecting":
+//   - an item left unmatched (product_id null — we don't know what it is),
+//   - a matched item whose requested quantity exceeds available stock,
+//   - a matched item with a variant the product does not offer.
+// Price corrections are NOT hard problems (we silently fix them).
+
+/** A matched item the customer asked for more of than we can supply. Structured
+ *  (vs. the diagnostics string) so the pipeline can build a truthful
+ *  availability reply naming the product and the real amount on hand. */
+export interface StockShortfall {
+  productName: string;
+  requested: number;
+  available: number;
+}
+
+/**
+ * True when the validated extraction has any HARD availability problem
+ * (unmatched item, quantity over stock, or an unoffered variant). Catalog-free:
+ * it reads only the validator's own output, which was already computed against
+ * the exact catalog sent to Gemini.
+ */
+export function hasHardAvailabilityProblem(
+  validation: ValidationResult
+): boolean {
+  const { items, diagnostics } = validation;
+  return (
+    items.some((i) => i.product_id === null) ||
+    (diagnostics.outOfStockItems?.length ?? 0) > 0 ||
+    (diagnostics.invalidVariants?.length ?? 0) > 0
+  );
+}
+
+/**
+ * Whether a validated order may be finalized (promoted out of "collecting").
+ * Requires: at least one item, every required field supplied (missingFields
+ * empty), and NO hard availability problem. This is the deterministic gate the
+ * pipeline pairs with the model's own "confirmed" stage before committing a
+ * real order — the model can never talk its way past it.
+ */
+export function isFinalizable(
+  validation: ValidationResult,
+  missingFields: string[]
+): boolean {
+  return (
+    missingFields.length === 0 &&
+    validation.items.length > 0 &&
+    !hasHardAvailabilityProblem(validation)
+  );
+}
+
+/**
+ * Structured list of matched items whose requested quantity exceeds available
+ * stock, resolved against the catalog so the pipeline can tell the customer the
+ * exact amount we can offer. Unmatched items are skipped (we have no stock for
+ * an unknown product).
+ */
+export function getStockShortfalls(
+  validation: ValidationResult,
+  catalog: CompressedProduct[]
+): StockShortfall[] {
+  const byId = new Map(catalog.map((p) => [p.id, p]));
+  const shortfalls: StockShortfall[] = [];
+  for (const item of validation.items) {
+    if (item.product_id === null) continue;
+    const product = byId.get(item.product_id);
+    if (!product) continue;
+    if (product.stock < item.quantity) {
+      shortfalls.push({
+        productName: product.name,
+        requested: item.quantity,
+        available: product.stock,
+      });
+    }
+  }
+  return shortfalls;
+}

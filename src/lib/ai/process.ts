@@ -4,9 +4,22 @@ import { getProvider, isWindowExpiredError } from "@/lib/messaging";
 import { shouldProcess } from "./regex-filter";
 import { assembleContext } from "./context";
 import { callGemini, AI_CONFIG } from "./gemini";
-import { createOrderFromAI } from "./order-creator";
-import type { PipelineInput, GeminiResponse } from "./types";
-import type { ValidationDiagnostics } from "./validate-extraction";
+import {
+  upsertCollectingOrder,
+  promoteCollectingToIncoming,
+  cancelCollectingOrder,
+} from "./order-creator";
+import {
+  validateExtraction,
+  hasHardAvailabilityProblem,
+  isFinalizable,
+  getStockShortfalls,
+} from "./validate-extraction";
+import type { PipelineInput, GeminiResponse, OrderStage } from "./types";
+import type {
+  ValidationDiagnostics,
+  StockShortfall,
+} from "./validate-extraction";
 
 /**
  * How long the pipeline waits before processing an inbound message, so a
@@ -145,16 +158,25 @@ export async function processInboundMessage(
       `${tag} | context | ${context.conversationHistory.split("\n").length} messages, ${context.catalog.length} products, lastOutbound=${context.lastOutboundSenderType ?? "none"}`
     );
 
-    // --- Step 2: RegEx pre-filter ---
-    if (!shouldProcess(effectiveContent, context.lastOutboundSenderType)) {
-      console.log(`${tag} | regex | NO signal → skip AI`);
+    // --- Step 2: RegEx pre-filter (cold-start gate) ---
+    // If an order is already being collected in this conversation, EVERY inbound
+    // message is part of that live conversation (an address, a "yes", a bare
+    // word), so we always process and let the stage machine decide. The regex is
+    // only the cold-start gate for conversations with no open draft.
+    if (
+      !context.hasOpenCollectingOrder &&
+      !shouldProcess(effectiveContent, context.lastOutboundSenderType)
+    ) {
+      console.log(`${tag} | regex | NO signal, no open order → skip AI`);
       await supabase
         .from("messages")
         .update({ has_order_signal: false, ai_processed: true })
         .in("id", burstIds);
       return;
     }
-    console.log(`${tag} | regex | signal DETECTED → calling Gemini`);
+    console.log(
+      `${tag} | regex | ${context.hasOpenCollectingOrder ? "open collecting order → always process" : "signal DETECTED"} → calling Gemini`
+    );
 
     // Mark as having order signal
     await supabase
@@ -251,7 +273,8 @@ export async function processInboundMessage(
           currency: context.settings.currency,
         },
         effectiveContent,
-        context.merchantContext
+        context.merchantContext,
+        context.orderSoFar
       );
     } catch (firstError) {
       console.error(`${tag} | gemini | FAILED (attempt 1):`, firstError);
@@ -264,7 +287,8 @@ export async function processInboundMessage(
             currency: context.settings.currency,
           },
           effectiveContent,
-          context.merchantContext
+          context.merchantContext,
+          context.orderSoFar
         );
       } catch (secondError) {
         console.error(`${tag} | gemini | FAILED (attempt 2):`, secondError);
@@ -311,13 +335,13 @@ export async function processInboundMessage(
 
     // --- Step 4: Save AI result to message ---
     console.log(
-      `${tag} | gemini | intent=${geminiResponse.intent}, confidence=${(geminiResponse.confidence * 100).toFixed(0)}%, items=${geminiResponse.items.length}, missing=[${geminiResponse.missing_fields.join(",")}]`
+      `${tag} | gemini | intent=${geminiResponse.intent}, stage=${geminiResponse.order_stage}, confidence=${(geminiResponse.confidence * 100).toFixed(0)}%, items=${geminiResponse.items.length}, missing=[${geminiResponse.missing_fields.join(",")}], needsHuman=${geminiResponse.needs_human}`
     );
     if (geminiResponse.reasoning) {
       console.log(`${tag} | gemini | reasoning: ${geminiResponse.reasoning.slice(0, 200)}`);
     }
-    if (geminiResponse.clarifying_question) {
-      console.log(`${tag} | gemini | clarifying_question: ${geminiResponse.clarifying_question.slice(0, 150)}`);
+    if (geminiResponse.reply_to_customer) {
+      console.log(`${tag} | gemini | reply_to_customer: ${geminiResponse.reply_to_customer.slice(0, 150)}`);
     }
 
     // ai_processed applies to the whole burst; ai_result (the extraction) is
@@ -331,11 +355,34 @@ export async function processInboundMessage(
       .update({ ai_result: geminiResponse as Record<string, unknown> })
       .eq("id", messageId);
 
-    // --- Step 5: Decision tree ---
+    // --- Step 5: Conversational stage machine ---
+    // The model proposes a stage each turn; the pipeline resolves the REAL stage
+    // deterministically (never trusting the model to upgrade past what's valid),
+    // maintains the single open `collecting` draft, and sends exactly one reply.
     const { settings } = context;
+    const escalate = geminiResponse.needs_human === true;
+    const reply = geminiResponse.reply_to_customer;
 
+    /** Send one reply to the customer via the conversation channel (no-op on null). */
+    const sendReply = async (text: string | null): Promise<void> => {
+      if (!text) return;
+      await sendAIMessage(
+        supabase,
+        merchantId,
+        conversationId,
+        messageId,
+        chatId,
+        platform,
+        credentials,
+        text
+      );
+    };
+
+    // --- Non-order intents: no order side effects ---
     if (geminiResponse.intent === "other") {
-      console.log(`${tag} | action | intent=other → no action`);
+      if (escalate) await raiseHandoffFlag(supabase, { merchantId, conversationId, messageId });
+      await sendReply(escalate ? settings.handoffMessage : reply);
+      console.log(`${tag} | action | intent=other → ${escalate ? "handoff" : reply ? "reply sent" : "no reply"}`);
       await recordDecision(supabase, {
         merchantId,
         conversationId,
@@ -348,28 +395,13 @@ export async function processInboundMessage(
     }
 
     if (geminiResponse.intent === "question") {
-      if (geminiResponse.answer) {
-        console.log(`${tag} | action | intent=question → sending AI answer`);
-        await sendAIMessage(
-          supabase,
-          merchantId,
-          conversationId,
-          messageId,
-          chatId,
-          platform,
-          credentials,
-          geminiResponse.answer
-        );
-        await recordDecision(supabase, {
-          merchantId,
-          conversationId,
-          messageId,
-          inputHash,
-          decisionCase: "question_answered",
-          geminiConfidence: geminiResponse.confidence,
-        });
+      if (escalate) {
+        await raiseHandoffFlag(supabase, { merchantId, conversationId, messageId });
+        await sendReply(settings.handoffMessage);
+      } else if (reply) {
+        await sendReply(reply);
       } else {
-        console.log(`${tag} | action | intent=question → flag (customer_waiting, no answer generated)`);
+        // No answer generated → surface to the merchant instead of ghosting.
         await supabase.from("flags").insert({
           merchant_id: merchantId,
           conversation_id: conversationId,
@@ -380,158 +412,70 @@ export async function processInboundMessage(
           description: geminiResponse.reasoning,
           recommended_action: "Reply to the customer's question.",
         });
-        await recordDecision(supabase, {
-          merchantId,
-          conversationId,
-          messageId,
-          inputHash,
-          decisionCase: "question_flagged",
-          geminiConfidence: geminiResponse.confidence,
-        });
       }
+      console.log(`${tag} | action | intent=question → ${escalate ? "handoff" : reply ? "answered" : "flagged"}`);
+      await recordDecision(supabase, {
+        merchantId,
+        conversationId,
+        messageId,
+        inputHash,
+        decisionCase: reply || escalate ? "question_answered" : "question_flagged",
+        geminiConfidence: geminiResponse.confidence,
+      });
       return;
     }
 
-    // intent === "order"
-    const isAboveThreshold =
-      geminiResponse.confidence >= settings.confidenceThreshold;
-    const hasMissingFields = geminiResponse.missing_fields.length > 0;
+    // --- intent === "order": run the stage machine ---
+    const validation = validateExtraction(geminiResponse, context.catalog);
+    const hasMissing = geminiResponse.missing_fields.length > 0;
+    const hardProblem = hasHardAvailabilityProblem(validation);
+    const stockShortfalls = getStockShortfalls(validation, context.catalog);
+    const finalizable = isFinalizable(validation, geminiResponse.missing_fields);
+    const diagnostics = validation.diagnostics;
+
+    // Resolve the real stage. Start from the model's, then FORCE it down: an
+    // order with a hard availability problem, a still-missing required field, or
+    // an active escalation can never be ready_to_confirm/confirmed — it keeps
+    // collecting. An order-intent "none" is treated as collecting.
+    let stage: OrderStage = geminiResponse.order_stage;
+    if (stage === "none") stage = "collecting";
+    if (
+      stage !== "cancelled" &&
+      (hardProblem || hasMissing || escalate) &&
+      (stage === "ready_to_confirm" || stage === "confirmed")
+    ) {
+      stage = "collecting";
+    }
     console.log(
-      `${tag} | decision | confidence=${(geminiResponse.confidence * 100).toFixed(0)}% (threshold=${(settings.confidenceThreshold * 100).toFixed(0)}%), aboveThreshold=${isAboveThreshold}, missingFields=${hasMissingFields}, autoClarity=${settings.autoClarity}`
+      `${tag} | stage | model=${geminiResponse.order_stage} → resolved=${stage} (missing=${hasMissing}, hardProblem=${hardProblem}, escalate=${escalate}, finalizable=${finalizable})`
     );
 
-    if (isAboveThreshold && !hasMissingFields) {
-      // Case A: High confidence, complete order → auto-create
-      const { orderId, orderNumber, diagnostics } = await createOrderFromAI(
-        supabase,
-        {
-          merchantId,
-          customerId,
-          conversationId,
-          messageId,
-          geminiResponse,
-          catalog: context.catalog,
-          currency: context.settings.currency,
-        }
-      );
-      await flagInvalidProducts(supabase, {
-        merchantId,
-        orderId,
-        conversationId,
-        messageId,
-        invalidProductIds: diagnostics.invalidProductIds,
-      });
-      await flagStockAndVariantIssues(supabase, {
-        merchantId,
-        orderId,
-        conversationId,
-        messageId,
-        outOfStockItems: diagnostics.outOfStockItems ?? [],
-        invalidVariants: diagnostics.invalidVariants ?? [],
-      });
-      await recordDecision(supabase, {
-        merchantId,
-        conversationId,
-        messageId,
-        inputHash,
-        decisionCase: "order_auto_created",
-        geminiConfidence: geminiResponse.confidence,
-        orderId,
-        validationDiagnostics: diagnostics,
-      });
-      console.log(`${tag} | action | Case A → order created: ${orderNumber}`);
-      return;
-    }
-
-    if (isAboveThreshold && hasMissingFields && settings.autoClarity) {
-      // Case B: High confidence but missing fields, auto-clarify enabled → send question
-      console.log(`${tag} | action | Case B → sending clarifying question`);
-      if (geminiResponse.clarifying_question) {
-        await sendAIMessage(
-          supabase,
-          merchantId,
-          conversationId,
-          messageId,
-          chatId,
-          platform,
-          credentials,
-          geminiResponse.clarifying_question
-        );
-        console.log(`${tag} | action | clarifying question sent via ${platform}`);
+    // --- Cancellation: call off any open draft, send the reply ---
+    if (stage === "cancelled") {
+      if (context.collectingOrderId) {
+        await cancelCollectingOrder(supabase, context.collectingOrderId, merchantId);
       }
+      if (escalate) await raiseHandoffFlag(supabase, { merchantId, conversationId, messageId });
+      await sendReply(escalate ? settings.handoffMessage : reply);
+      console.log(`${tag} | action | order cancelled by customer${context.collectingOrderId ? ` → ${context.collectingOrderId.slice(0, 8)}` : ""}`);
       await recordDecision(supabase, {
         merchantId,
         conversationId,
         messageId,
         inputHash,
-        decisionCase: "order_clarify_sent",
+        decisionCase: "order_cancelled_by_customer",
         geminiConfidence: geminiResponse.confidence,
+        orderId: context.collectingOrderId,
       });
       return;
     }
 
-    if (isAboveThreshold && hasMissingFields && !settings.autoClarity) {
-      // Case C: High confidence, missing fields, auto-clarify off → create order + flag
-      const { orderId, orderNumber, diagnostics } = await createOrderFromAI(
-        supabase,
-        {
-          merchantId,
-          customerId,
-          conversationId,
-          messageId,
-          geminiResponse,
-          catalog: context.catalog,
-          currency: context.settings.currency,
-        }
-      );
-      await supabase.from("flags").insert({
-        merchant_id: merchantId,
-        order_id: orderId,
-        conversation_id: conversationId,
-        message_id: messageId,
-        priority: "medium",
-        category: "ai_low_confidence",
-        title: "Order created with missing details",
-        description: `Missing: ${geminiResponse.missing_fields.join(", ")}. ${geminiResponse.reasoning}`,
-        recommended_action:
-          "Review the order and contact the customer for missing information.",
-      });
-      await flagInvalidProducts(supabase, {
-        merchantId,
-        orderId,
-        conversationId,
-        messageId,
-        invalidProductIds: diagnostics.invalidProductIds,
-      });
-      await flagStockAndVariantIssues(supabase, {
-        merchantId,
-        orderId,
-        conversationId,
-        messageId,
-        outOfStockItems: diagnostics.outOfStockItems ?? [],
-        invalidVariants: diagnostics.invalidVariants ?? [],
-      });
-      await recordDecision(supabase, {
-        merchantId,
-        conversationId,
-        messageId,
-        inputHash,
-        decisionCase: "order_created_flagged",
-        geminiConfidence: geminiResponse.confidence,
-        orderId,
-        validationDiagnostics: diagnostics,
-      });
-      console.log(`${tag} | action | Case C → order ${orderNumber} + flag (missing fields)`);
-      return;
-    }
-
-    // Case D: Low confidence → create an AI *proposal* (not a live order) +
-    // flag + send handoff. The merchant explicitly confirms (→ incoming) or
-    // rejects (→ cancelled) the proposal, so unreviewed AI guesses never
-    // pollute the live order stats. "AI suggests, the merchant decides."
-    const { orderId, orderNumber, diagnostics } = await createOrderFromAI(
-      supabase,
-      {
+    // --- Upsert the single open collecting draft ---
+    // Don't mint an empty draft on a first "I want to order" with no items yet;
+    // once a draft exists we always update it.
+    let orderId: string | null = context.collectingOrderId;
+    if (context.collectingOrderId !== null || validation.items.length > 0) {
+      const result = await upsertCollectingOrder(supabase, {
         merchantId,
         customerId,
         conversationId,
@@ -539,61 +483,85 @@ export async function processInboundMessage(
         geminiResponse,
         catalog: context.catalog,
         currency: context.settings.currency,
-        status: "ai_proposal",
-      }
-    );
+        collectingOrderId: context.collectingOrderId,
+        collectionState: {
+          missing_fields: geminiResponse.missing_fields,
+          awaiting_confirmation: stage === "ready_to_confirm",
+          last_readback: stage === "ready_to_confirm" ? reply : null,
+        },
+      });
+      orderId = result.orderId;
 
-    await supabase.from("flags").insert({
-      merchant_id: merchantId,
-      order_id: orderId,
-      conversation_id: conversationId,
-      message_id: messageId,
-      priority: "medium",
-      category: "ai_low_confidence",
-      title: "Low confidence — AI proposal awaiting review",
-      description: `Confidence: ${(geminiResponse.confidence * 100).toFixed(0)}%. ${geminiResponse.reasoning}`,
-      recommended_action: "Review the proposal and confirm or reject it.",
-    });
+      await flagInvalidProducts(supabase, {
+        merchantId,
+        orderId,
+        conversationId,
+        messageId,
+        invalidProductIds: diagnostics.invalidProductIds,
+      });
+      await flagStockAndVariantIssues(supabase, {
+        merchantId,
+        orderId,
+        conversationId,
+        messageId,
+        outOfStockItems: diagnostics.outOfStockItems ?? [],
+        invalidVariants: diagnostics.invalidVariants ?? [],
+      });
+    }
 
-    await flagInvalidProducts(supabase, {
-      merchantId,
-      orderId,
-      conversationId,
-      messageId,
-      invalidProductIds: diagnostics.invalidProductIds,
-    });
+    // --- Finalize gate: promote ONLY when the model confirmed AND the order is
+    // deterministically finalizable (which, by the force-down above, already
+    // implies no hard problem / no missing field / no escalation). ---
+    if (stage === "confirmed" && finalizable && orderId) {
+      await promoteCollectingToIncoming(supabase, orderId, merchantId);
+      // Prefer the model's acknowledgement; fall back to a short templated ack.
+      await sendReply(escalate ? settings.handoffMessage : (reply ?? "Your order is placed ✅"));
+      if (escalate) await raiseHandoffFlag(supabase, { merchantId, conversationId, messageId });
+      console.log(`${tag} | action | order confirmed → promoted ${orderId.slice(0, 8)} to incoming`);
+      await recordDecision(supabase, {
+        merchantId,
+        conversationId,
+        messageId,
+        inputHash,
+        decisionCase: "order_confirmed",
+        geminiConfidence: geminiResponse.confidence,
+        orderId,
+        validationDiagnostics: diagnostics,
+      });
+      return;
+    }
 
-    await flagStockAndVariantIssues(supabase, {
-      merchantId,
-      orderId,
-      conversationId,
-      messageId,
-      outOfStockItems: diagnostics.outOfStockItems ?? [],
-      invalidVariants: diagnostics.invalidVariants ?? [],
-    });
+    // --- Still collecting / awaiting confirmation: send exactly one reply ---
+    // Truth override: if a hard stock shortfall exists and the model's reply
+    // didn't state the real available amount, replace it with a deterministic
+    // availability notice so the customer is never misled. Escalation wins.
+    let outgoing: string | null;
+    if (escalate) {
+      outgoing = settings.handoffMessage;
+      await raiseHandoffFlag(supabase, { merchantId, conversationId, messageId });
+    } else if (stockShortfalls.length > 0 && !replyStatesShortfalls(reply, stockShortfalls)) {
+      outgoing = buildStockShortfallReply(stockShortfalls);
+      console.log(`${tag} | stock | reply did not surface shortfall → overriding with availability notice`);
+    } else {
+      outgoing = reply;
+    }
+    await sendReply(outgoing);
 
-    // Send handoff message to customer
-    await sendAIMessage(
-      supabase,
-      merchantId,
-      conversationId,
-      messageId,
-      chatId,
-      platform,
-      credentials,
-      settings.handoffMessage
+    const decisionCase =
+      stage === "ready_to_confirm" ? "order_ready_to_confirm" : "order_collecting";
+    console.log(
+      `${tag} | action | stage=${stage} → reply ${outgoing ? "sent" : "none"}, order=${orderId ? orderId.slice(0, 8) : "none (awaiting first item)"}`
     );
     await recordDecision(supabase, {
       merchantId,
       conversationId,
       messageId,
       inputHash,
-      decisionCase: "order_proposal_created",
+      decisionCase,
       geminiConfidence: geminiResponse.confidence,
       orderId,
       validationDiagnostics: diagnostics,
     });
-    console.log(`${tag} | action | Case D → AI proposal ${orderNumber} + flag + handoff sent`);
   } catch (err) {
     console.error(`${tag} | ERROR |`, err);
   }
@@ -621,10 +589,10 @@ async function recordDecision(
       | "intent_other"
       | "question_answered"
       | "question_flagged"
-      | "order_auto_created"
-      | "order_clarify_sent"
-      | "order_created_flagged"
-      | "order_proposal_created";
+      | "order_collecting"
+      | "order_ready_to_confirm"
+      | "order_confirmed"
+      | "order_cancelled_by_customer";
     geminiConfidence: number | null;
     orderId?: string | null;
     validationDiagnostics?: ValidationDiagnostics | null;
@@ -754,6 +722,57 @@ async function flagStockAndVariantIssues(
     recommended_action:
       "Review the order items against current stock and offered variants before confirming with the customer.",
   });
+}
+
+/**
+ * Raise a merchant-visible flag when the model signals a genuine escalation
+ * (needs_human). Fire-and-forget in spirit — layered alongside the handoff
+ * message so the merchant sees the customer explicitly wants a person.
+ */
+async function raiseHandoffFlag(
+  supabase: ReturnType<typeof createAdminClient>,
+  params: { merchantId: string; conversationId: string; messageId: string }
+): Promise<void> {
+  const { merchantId, conversationId, messageId } = params;
+  console.log(`[AI Pipeline] ${messageId.slice(0, 8)} | escalation → handoff + flag`);
+  await supabase.from("flags").insert({
+    merchant_id: merchantId,
+    conversation_id: conversationId,
+    message_id: messageId,
+    priority: "medium",
+    category: "human_requested",
+    title: "Customer asked for a human",
+    description:
+      "The AI escalated this conversation — the customer explicitly asked for a person or the request is out of scope. A handoff message was sent.",
+    recommended_action: "Take over the conversation and assist the customer.",
+  });
+}
+
+/**
+ * Whether the model's reply already states the real available amount for every
+ * stock shortfall — a cheap heuristic (does the reply contain each available
+ * quantity as text?). When false, the pipeline overrides the reply with a
+ * deterministic availability notice so the customer is always told the truth.
+ */
+function replyStatesShortfalls(
+  reply: string | null,
+  shortfalls: StockShortfall[]
+): boolean {
+  if (!reply) return false;
+  return shortfalls.every((s) => reply.includes(String(s.available)));
+}
+
+/**
+ * Deterministic, truthful availability notice naming each product and the exact
+ * amount on hand — used when the model failed to surface a stock shortfall.
+ */
+function buildStockShortfallReply(shortfalls: StockShortfall[]): string {
+  return shortfalls
+    .map(
+      (s) =>
+        `Sorry, we only have ${s.available} of ${s.productName} right now. Would you like that amount, or something else?`
+    )
+    .join(" ");
 }
 
 // --- Circuit breaker helpers ---
