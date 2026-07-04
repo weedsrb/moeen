@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getProvider, isWindowExpiredError } from "@/lib/messaging";
 import { shouldProcess } from "./regex-filter";
+import { classifyIntent } from "./classify-intent";
 import { assembleContext } from "./context";
 import { callGemini, AI_CONFIG } from "./gemini";
 import {
@@ -158,25 +159,66 @@ export async function processInboundMessage(
       `${tag} | context | ${context.conversationHistory.split("\n").length} messages, ${context.catalog.length} products, lastOutbound=${context.lastOutboundSenderType ?? "none"}`
     );
 
-    // --- Step 2: RegEx pre-filter (cold-start gate) ---
-    // If an order is already being collected in this conversation, EVERY inbound
-    // message is part of that live conversation (an address, a "yes", a bare
-    // word), so we always process and let the stage machine decide. The regex is
-    // only the cold-start gate for conversations with no open draft.
-    if (
-      !context.hasOpenCollectingOrder &&
-      !shouldProcess(effectiveContent, context.lastOutboundSenderType)
-    ) {
-      console.log(`${tag} | regex | NO signal, no open order → skip AI`);
+    // --- Step 2: Intent gate (cold-start gate) ---
+    // Replaces the old rigid regex pre-filter, which was a hard recall ceiling
+    // (a real order phrased unusually never reached the model). A cheap/fast LLM
+    // classifies intent so nothing real is dropped, while cost stays bounded.
+    //
+    // Decision order:
+    //   1. ALWAYS PROCESS (skip the classifier) on mid-conversation signals —
+    //      an open collecting draft, a reply to an AI message, or a bare number
+    //      (a quantity answer). These are unambiguously part of a live order.
+    //   2. Otherwise CLASSIFY: "order"/"question" → proceed; "other" → skip AI.
+    //   3. Classifier error → FAIL OPEN to the regex filter, so a classifier
+    //      outage can never drop a real order. If regex also says skip, skip.
+    //
+    // This gate NEVER writes an ai_decisions audit row — those stay proportional
+    // to full-model (Gemini extraction) spend. We only console.log the decision.
+    const isBareNumber = /^\d+$/.test(effectiveContent.trim());
+
+    let proceed: boolean;
+    if (context.hasOpenCollectingOrder) {
+      proceed = true;
+      console.log(`${tag} | gate | open collecting order → always process`);
+    } else if (context.lastOutboundSenderType === "ai") {
+      proceed = true;
+      console.log(`${tag} | gate | reply to AI message → always process`);
+    } else if (isBareNumber) {
+      proceed = true;
+      console.log(`${tag} | gate | bare number (quantity answer) → always process`);
+    } else {
+      // Cold conversation with no mid-order signal — ask the cheap classifier.
+      try {
+        const intent = await classifyIntent(
+          effectiveContent,
+          context.conversationHistory
+        );
+        proceed = intent === "order" || intent === "question";
+        console.log(
+          `${tag} | gate | classifier intent=${intent} → ${proceed ? "process" : "skip AI"}`
+        );
+      } catch (classifierError) {
+        // FAIL OPEN: a classifier outage must never drop a real order. Fall back
+        // to the regex filter — if it detects a signal we still process.
+        const regexSignal = shouldProcess(
+          effectiveContent,
+          context.lastOutboundSenderType
+        );
+        proceed = regexSignal;
+        console.error(`${tag} | gate | classifier error:`, classifierError);
+        console.log(
+          `${tag} | gate | classifier FAILED → fail-open to regex=${regexSignal ? "signal → process" : "no signal → skip AI"}`
+        );
+      }
+    }
+
+    if (!proceed) {
       await supabase
         .from("messages")
         .update({ has_order_signal: false, ai_processed: true })
         .in("id", burstIds);
       return;
     }
-    console.log(
-      `${tag} | regex | ${context.hasOpenCollectingOrder ? "open collecting order → always process" : "signal DETECTED"} → calling Gemini`
-    );
 
     // Mark as having order signal
     await supabase

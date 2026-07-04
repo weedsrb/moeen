@@ -9,6 +9,9 @@ import { geminiResponseSchema, type GeminiResponse, type CompressedProduct } fro
  */
 export const AI_CONFIG = {
   model: "gemini-2.5-flash",
+  // Cheap/fast model for the cold-start intent classifier (see classify-intent.ts).
+  // NOTE: verify against the live Gemini model list — model ids change over time.
+  classifierModel: "gemini-2.5-flash-lite",
   promptVersion: "v3",
   temperature: 0.1,
   maxOutputTokens: 8192,
