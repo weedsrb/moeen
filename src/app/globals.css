@@ -75,6 +75,9 @@
 
   /* Mo'een animation keyframes */
   --animate-flag-pulse: flag-pulse 1.5s infinite;
+  --animate-flag-pulse-critical: flag-pulse-critical 1.5s infinite;
+  --animate-flag-pulse-medium: flag-pulse-medium 1.5s infinite;
+  --animate-flag-pulse-low: flag-pulse-low 1.8s infinite;
 }
 
 /* Mo'een light theme */
@@ -147,7 +150,7 @@
   --sidebar-ring: #A1A1AA;
 }
 
-/* Critical flag pulse animation */
+/* Flag badge pulse animations — one per priority so the ring matches the color */
 @keyframes flag-pulse {
   0% {
     box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4);
@@ -157,6 +160,42 @@
   }
   100% {
     box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+  }
+}
+
+@keyframes flag-pulse-critical {
+  0% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(239, 68, 68, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+  }
+}
+
+@keyframes flag-pulse-medium {
+  0% {
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 7px rgba(245, 158, 11, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0);
+  }
+}
+
+@keyframes flag-pulse-low {
+  0% {
+    box-shadow: 0 0 0 0 rgba(107, 114, 128, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(107, 114, 128, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(107, 114, 128, 0);
   }
 }
 

@@ -4,6 +4,10 @@ import { useState, useCallback, useRef } from "react";
 import dynamic from "next/dynamic";
 import { useRealtimeConversations } from "@/hooks/use-realtime-conversations";
 import {
+  useUnreadCount,
+  useUnreadCountSetter,
+} from "@/components/layout/unread-count-provider";
+import {
   ConversationList,
   type ConversationWithCustomer,
 } from "./conversation-list";
@@ -39,6 +43,9 @@ export function ConversationsContent({
   const sendRef = useRef<ChatSendRef | null>(null);
   const selected = conversations.find((c) => c.id === selectedId) ?? null;
 
+  const unreadTotal = useUnreadCount();
+  const setUnreadTotal = useUnreadCountSetter();
+
   const handleConversationUpdate = useCallback(
     (updated: Conversation) => {
       setConversations((prev) => {
@@ -70,6 +77,18 @@ export function ConversationsContent({
   function handleSelect(conversation: ConversationWithCustomer) {
     setSelectedId(conversation.id);
     setMobileShowChat(true);
+
+    // Opening a conversation clears its unread server-side; reflect that
+    // instantly here and in the sidebar Messages badge (realtime reconciles).
+    const prevUnread = conversation.unread_count ?? 0;
+    if (prevUnread > 0) {
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === conversation.id ? { ...c, unread_count: 0 } : c
+        )
+      );
+      setUnreadTotal(Math.max(0, unreadTotal - prevUnread));
+    }
   }
 
   function handleBack() {

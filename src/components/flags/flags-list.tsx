@@ -6,6 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { AlertTriangle, Check, Loader2 } from "lucide-react";
+import { useFlagsSummarySetter } from "@/components/layout/flags-count-provider";
+import { highestPriority } from "@/lib/utils/flags";
 import type { Flag } from "@/types/flag";
 
 type Action = { type: "resolve"; id: string };
@@ -16,6 +18,7 @@ interface FlagsListProps {
 
 export function FlagsList({ initialFlags }: FlagsListProps) {
   const router = useRouter();
+  const setFlagsSummary = useFlagsSummarySetter();
   const [isPending, startTransition] = useTransition();
   const [errorId, setErrorId] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
@@ -29,12 +32,26 @@ export function FlagsList({ initialFlags }: FlagsListProps) {
   function resolve(id: string) {
     setErrorId(null);
     setPendingId(id);
+
+    // Optimistically shrink the sidebar Flags badge immediately (realtime
+    // reconciles once the resolve UPDATE lands).
+    const remaining = flags.filter((f) => f.id !== id);
+    setFlagsSummary({
+      count: remaining.length,
+      highestPriority: highestPriority(remaining.map((f) => f.priority)),
+    });
+
     startTransition(async () => {
       applyOptimistic({ type: "resolve", id });
       const res = await fetch(`/api/flags/${id}/resolve`, { method: "POST" });
       if (!res.ok) {
         setErrorId(id);
         setPendingId(null);
+        // Roll the badge back to the full open set on failure.
+        setFlagsSummary({
+          count: flags.length,
+          highestPriority: highestPriority(flags.map((f) => f.priority)),
+        });
         return;
       }
       setPendingId(null);

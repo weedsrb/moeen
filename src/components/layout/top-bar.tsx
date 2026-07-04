@@ -1,9 +1,16 @@
 "use client";
 
+import { useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import { useMerchant } from "./merchant-provider";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
+import {
+  setSoundMuted,
+  subscribeMuted,
+  getMutedSnapshot,
+  getMutedServerSnapshot,
+} from "@/lib/utils/notification-sound";
 import {
   Avatar,
   AvatarFallback,
@@ -15,11 +22,20 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Bell, LogOut } from "lucide-react";
+import { Bell, LogOut, Volume2, VolumeX } from "lucide-react";
 
 export function TopBar() {
   const merchant = useMerchant();
   const router = useRouter();
+  const muted = useSyncExternalStore(
+    subscribeMuted,
+    getMutedSnapshot,
+    getMutedServerSnapshot
+  );
+
+  function toggleMuted() {
+    setSoundMuted(!muted);
+  }
 
   const initials = merchant.businessName
     .split(" ")
@@ -45,6 +61,23 @@ export function TopBar() {
       </span>
 
       <div className="flex items-center gap-2">
+        {/* Notification sound toggle */}
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={toggleMuted}
+          title={muted ? "Notification sounds off" : "Notification sounds on"}
+          aria-label={
+            muted ? "Unmute notification sounds" : "Mute notification sounds"
+          }
+        >
+          {muted ? (
+            <VolumeX className="h-5 w-5" />
+          ) : (
+            <Volume2 className="h-5 w-5" />
+          )}
+        </Button>
+
         {/* Notification bell (static for Phase 1) */}
         <Button variant="ghost" size="icon" className="relative">
           <Bell className="h-5 w-5" />

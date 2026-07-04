@@ -6,6 +6,12 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useUnreadCount } from "@/components/layout/unread-count-provider";
+import { useOrdersCount } from "@/components/layout/orders-count-provider";
+import {
+  useFlagsCount,
+  useHighestFlagPriority,
+} from "@/components/layout/flags-count-provider";
+import { flagBadgeColorClass } from "@/lib/utils/flags";
 import {
   LayoutDashboard,
   MessageSquare,
@@ -29,6 +35,9 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const unreadCount = useUnreadCount();
+  const ordersCount = useOrdersCount();
+  const flagsCount = useFlagsCount();
+  const flagsPriority = useHighestFlagPriority();
 
   async function handleSignOut() {
     await fetch("/api/auth/signout", { method: "POST" });
@@ -70,6 +79,24 @@ export function Sidebar() {
                   className="h-5 min-w-5 flex items-center justify-center px-1.5 text-[10px] ms-auto"
                 >
                   {unreadCount > 99 ? "99+" : unreadCount}
+                </Badge>
+              )}
+              {item.href === "/orders" && ordersCount > 0 && (
+                <Badge
+                  variant="default"
+                  className="h-5 min-w-5 flex items-center justify-center px-1.5 text-[10px] ms-auto"
+                >
+                  {ordersCount > 99 ? "99+" : ordersCount}
+                </Badge>
+              )}
+              {item.href === "/flags" && flagsCount > 0 && (
+                <Badge
+                  className={cn(
+                    "h-5 min-w-5 flex items-center justify-center px-1.5 text-[10px] ms-auto border-transparent",
+                    flagBadgeColorClass(flagsPriority)
+                  )}
+                >
+                  {flagsCount > 99 ? "99+" : flagsCount}
                 </Badge>
               )}
             </Link>
