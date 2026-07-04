@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { WhatsAppProvider } from "@/lib/messaging/whatsapp";
+import { getProvider, isWindowExpiredError } from "@/lib/messaging";
+import { InstagramProvider } from "@/lib/messaging/instagram";
+import { getMerchantCredentials } from "@/lib/messaging/credentials";
 import { sendMessageSchema } from "@/lib/validations/messaging";
 import { requireMerchantForApi } from "@/lib/auth/require-merchant";
 
@@ -35,40 +37,42 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  if (conversation.platform !== "whatsapp") {
-    return NextResponse.json(
-      { error: "Only WhatsApp conversations are supported" },
-      { status: 400 }
-    );
-  }
-
-  const { data: settings } = await supabase
-    .from("merchant_settings")
-    .select(
-      "whatsapp_phone_number_id, whatsapp_access_token, whatsapp_connected"
-    )
-    .eq("merchant_id", merchant.id)
-    .single();
-
-  if (
-    !settings?.whatsapp_connected ||
-    !settings.whatsapp_phone_number_id ||
-    !settings.whatsapp_access_token
-  ) {
-    return NextResponse.json(
-      { error: "WhatsApp not connected" },
-      { status: 400 }
-    );
-  }
-
-  const provider = new WhatsAppProvider(
-    settings.whatsapp_phone_number_id,
-    settings.whatsapp_access_token
+  const credentials = await getMerchantCredentials(
+    supabase,
+    merchant.id,
+    conversation.platform
   );
-  const result = await provider.sendMessage(
+
+  if (!credentials) {
+    return NextResponse.json(
+      { error: `${conversation.platform} not connected` },
+      { status: 400 }
+    );
+  }
+
+  const provider = getProvider(conversation.platform, credentials);
+
+  // Send normally first (works within the 24h standard window). The
+  // HUMAN_AGENT tag extends merchant (human) replies to a 7-day window, but
+  // it's a separately Meta-reviewed feature — only attempt it as a fallback
+  // once we know the standard window has actually expired. AI sends never
+  // use this tag.
+  let result = await provider.sendMessage(
     conversation.platform_chat_id,
     parsed.data.content
   );
+
+  if (
+    !result.success &&
+    isWindowExpiredError(result.error) &&
+    provider instanceof InstagramProvider
+  ) {
+    result = await provider.sendMessage(
+      conversation.platform_chat_id,
+      parsed.data.content,
+      { humanAgentTag: true }
+    );
+  }
 
   if (!result.success) {
     return NextResponse.json(

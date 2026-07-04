@@ -44,8 +44,10 @@ export interface PipelineInput {
   customerId: string;
   content: string;
   chatId: string;
-  whatsappPhoneNumberId: string;
-  whatsappAccessToken: string;
+  /** Channel this message arrived on, e.g. "whatsapp" | "instagram". */
+  platform: string;
+  /** Opaque per-provider credentials consumed by getProvider(platform, credentials). */
+  credentials: Record<string, string>;
 }
 
 // --- Compressed Catalog ---

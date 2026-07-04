@@ -18,6 +18,7 @@ Read these specs before making changes (in order):
 6. `docs/06_N8N_WORKFLOWS.md` — automation workflows
 7. `docs/07_AI_PIPELINE.md` — Gemini integration spec
 8. `docs/08_IMPLEMENTATION_GUIDE.md` — phased build plan
+9. `docs/09_INSTAGRAM.md` — Instagram integration (Phase 7, replaces WhatsApp as primary channel)
 
 ## Commands
 
@@ -53,7 +54,7 @@ WhatsApp credentials (phone number ID, access token, verify token) are stored pe
 | Database | Supabase (PostgreSQL + Auth + Realtime + Storage) |
 | AI | Google Gemini 2.5 Flash |
 | Automation | n8n Cloud |
-| Messaging | WhatsApp Cloud API (Meta Graph API v21.0) |
+| Messaging | Instagram Messaging API (Instagram Login, Graph API v25.0) — WhatsApp provider kept dormant |
 | Deployment | Vercel (frontend) + Supabase Cloud |
 
 ## Architecture
@@ -159,6 +160,13 @@ Core tables: `merchant_faq` (AI knowledge base Q&A pairs per merchant)
 | 4 — AI Pipeline | ✅ Complete | Gemini 2.5 Flash, regex pre-filter, order extraction, confidence-based decisions, AI settings UI, FAQ knowledge base |
 | 5 — Order Management | ⬜ Not started | |
 | 6 — Automation (n8n) | ⬜ Not started | |
+| 7 — Instagram | ✅ Code complete | **Primary channel.** Provider-agnostic core, IG webhook, OAuth, token refresh, settings UI landed; WhatsApp retired to dormant seam. **Pending merchant/ops setup + Meta App Review** — see `docs/09_INSTAGRAM.md` |
+
+## Channel Strategy (Updated)
+
+Instagram Direct Messaging is the **primary customer channel**, replacing WhatsApp — most target merchants (Palestinian/MENA small businesses) run their storefront on Instagram, IG messaging is free (no per-message fee), and OAuth onboarding is far lower-friction than WhatsApp's credential paste.
+
+**As of Phase 7 (code-complete):** the runtime is provider-agnostic via `getProvider(platform, credentials)` (`src/lib/messaging/index.ts`); Instagram is fully wired (webhook, OAuth, send, token refresh). WhatsApp has been **retired from the active surface** — its webhook route, connect route, settings card, and dashboard prompt are removed — but the seam is preserved: `src/lib/messaging/whatsapp.ts`, the `"whatsapp"` case in the provider factory and `credentials.ts`, and all `whatsapp_*` DB columns remain dormant, so WhatsApp is cheap to re-add later as a transactional/support layer. See `docs/09_INSTAGRAM.md` for the full design and the Meta App Review dependency (2–6 weeks — submit early).
 
 ## Phase 1 — What Was Built
 
@@ -345,6 +353,44 @@ Core tables: `merchant_faq` (AI knowledge base Q&A pairs per merchant)
 - Graceful degradation: Gemini failures create `ai_unavailable` flags instead of crashing
 - Atomic order creation: order + items + timeline created together with `ai_confidence` and `ai_extracted` metadata
 
+## Phase 7 — What Was Built (Instagram / channel switch)
+
+**Database Migration:**
+- `supabase/migrations/011_instagram.sql` — adds `instagram_connected`, `instagram_user_id`, `instagram_username`, `instagram_access_token`, `instagram_token_expires_at` to `merchant_settings` + partial index on `instagram_user_id` (webhook→merchant lookup). `whatsapp_*` columns left untouched (dormant).
+
+**Provider Layer (provider-agnostic core):**
+- `src/lib/messaging/index.ts` — `getProvider(platform, credentials)` factory (the single dispatch point) + `ProviderCredentials` type. Re-exports providers + `isWindowExpiredError`.
+- `src/lib/messaging/instagram.ts` — `InstagramProvider implements MessagingProvider`: `sendMessage` (optional `HUMAN_AGENT` tag), `receiveWebhook` (parses IG `entry[].messaging[]`), `getConversationHistory`, `sendTemplateMessage` (throws — no IG templates); statics `resolveProfile`, `getSelf`, `subscribeToMessages`, `exchangeCodeForToken`, `exchangeForLongLivedToken`, `refreshLongLivedToken`; `isWindowExpiredError` helper. Graph **v25.0**.
+- `src/lib/messaging/credentials.ts` — `getMerchantCredentials(supabase, merchantId, platform)` maps per-platform DB columns → the opaque `credentials` object.
+- `src/types/instagram.ts` — IG webhook payload + Graph send/error + OAuth/token/profile types.
+
+**AI Pipeline (generalized):**
+- `PipelineInput` (`src/lib/ai/types.ts`) now carries `platform` + `credentials` (was `whatsapp*`).
+- `src/lib/ai/process.ts` — `sendAIMessage()` sends via `getProvider(...)`; AI sends never use `HUMAN_AGENT`; a window-expired send raises a `customer_waiting` flag instead of failing silently.
+
+**API Routes:**
+- `src/app/api/webhooks/instagram/route.ts` — **single app-level** endpoint (no `[merchantId]` in path). GET verifies `INSTAGRAM_WEBHOOK_VERIFY_TOKEN`; POST resolves merchant by `instagram_user_id`, then reuses the WhatsApp webhook body logic with `platform="instagram"` (idempotency, customer upsert w/ `resolveProfile` name, conversation/message, auto-ack, `after()` pipeline). Always returns 200.
+- `src/app/api/messages/send/route.ts` — dispatches via factory on `conversation.platform`; passes `HUMAN_AGENT` on Instagram **merchant** sends.
+- `src/app/api/instagram/connect/route.ts` — GET starts OAuth (CSRF `state` cookie); DELETE disconnects.
+- `src/app/api/auth/instagram/callback/route.ts` — code→short→long-lived token, `getSelf`, subscribe `messages` webhook, save `instagram_*`.
+- `src/app/api/cron/instagram-refresh/route.ts` — refreshes tokens within 7 days of expiry (Bearer `CRON_SECRET`); raises a flag on failure.
+- `src/app/api/ai/process/route.ts` — reprocess route generalized to dispatch by conversation platform.
+
+**UI:**
+- `src/components/settings/instagram-connection.tsx` — "Connect with Instagram" OAuth button + connected/disconnected states; surfaces `ig_error` query param.
+- `src/components/dashboard/instagram-prompt.tsx` — dashboard banner when `instagram_connected = false`.
+- Settings + dashboard pages wired to Instagram; conversations header labels Instagram.
+
+**WhatsApp retirement (active surface removed, seam kept):**
+- Deleted: `api/webhooks/whatsapp/[merchantId]`, `api/whatsapp/connect`, `settings/whatsapp-connection.tsx`, `dashboard/whatsapp-prompt.tsx`, `validations/whatsapp.ts`.
+- Kept dormant: `src/lib/messaging/whatsapp.ts`, the `"whatsapp"` factory + credentials branch, `src/types/whatsapp.ts`, all `whatsapp_*` DB columns.
+
+**Key patterns established in Phase 7:**
+- Single Mo'een Meta app for all merchants; webhook events keyed by IG account ID → merchant lookup (vs. WhatsApp's per-merchant URL).
+- OAuth (Instagram Login) with long-lived (~60d) tokens refreshed via cron; no per-merchant credential paste.
+- 24h messaging window: AI replies inside it; window-expiry → `customer_waiting` flag. `HUMAN_AGENT` (7-day) only on merchant sends, never AI.
+- No IG templates — `sendTemplateMessage` throws.
+
 ## Testing
 
 **No automated test suite exists.** Testing is manual. A comprehensive verification test plan covering 7 test groups (Connection, Webhook, Receiving, Sending, Realtime, UI/Layout, Dashboard) is documented in the plan file at `/Users/waleedsrb/.claude/plans/elegant-pondering-coral.md`.
@@ -381,3 +427,11 @@ Always check after implementation:
 - Run `supabase/migrations/006_ai_settings.sql` in Supabase SQL Editor (AI persona columns + merchant_faq table)
 - Add `GEMINI_API_KEY` to `.env.local` (Google AI Studio API key)
 - AI settings are configurable per-merchant in Settings page (no env vars needed for AI behavior)
+
+**Phase 7 setup checklist (Instagram):**
+- Run `supabase/migrations/011_instagram.sql` in Supabase SQL Editor (instagram_* columns + index)
+- Add env vars to `.env.local` / Vercel: `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`, `INSTAGRAM_WEBHOOK_VERIFY_TOKEN`, `INSTAGRAM_REDIRECT_URI` (`{NEXT_PUBLIC_APP_URL}/api/auth/instagram/callback`), `CRON_SECRET`
+- Meta Console: add the **Instagram** product with **Instagram Login**; set OAuth redirect URI; set webhook URL `{NEXT_PUBLIC_APP_URL}/api/webhooks/instagram` + verify token; subscribe to the **`messages`** field
+- Scopes: `instagram_business_basic`, `instagram_business_manage_messages` (post-Jan-2025 names). Endpoints/version (`v25.0`) can change — verify against live Meta docs
+- **Business Verification + App Review** required for Advanced Access (2–6 weeks). Test with ≤25 IG test users under Standard Access meanwhile
+- Schedule the token-refresh cron (Vercel Cron / n8n) to hit `GET /api/cron/instagram-refresh` daily with `Authorization: Bearer $CRON_SECRET`

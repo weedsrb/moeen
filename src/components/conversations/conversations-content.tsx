@@ -97,14 +97,14 @@ export function ConversationsContent({
       {/* Chat Panel — right panel */}
       <div
         className={cn(
-          "flex-1 flex flex-col min-w-0",
+          "flex-1 flex flex-col min-w-0 sm:border-l border-border",
           !mobileShowChat ? "hidden sm:flex" : "flex"
         )}
       >
         {selected ? (
           <>
             {/* Chat header */}
-            <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
+            <div className="flex h-[57px] shrink-0 items-center gap-3 px-4 border-b border-border">
               <Button
                 variant="ghost"
                 size="icon"
@@ -124,7 +124,11 @@ export function ConversationsContent({
               <div>
                 <p className="text-sm font-medium">{customerName}</p>
                 <p className="text-[10px] text-muted-foreground">
-                  {selected.platform === "whatsapp" ? "WhatsApp" : selected.platform}
+                  {selected.platform === "instagram"
+                    ? "Instagram"
+                    : selected.platform === "whatsapp"
+                      ? "WhatsApp"
+                      : selected.platform}
                 </p>
               </div>
             </div>
