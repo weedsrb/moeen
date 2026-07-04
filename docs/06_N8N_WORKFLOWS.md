@@ -2,31 +2,53 @@
 
 > n8n is Mo'een's rules engine. It handles everything that doesn't need AI — and orchestrates the things that do.
 
+> **Status (2026) — read first.** None of these workflows are built yet: n8n
+> automation is **Phase 6 (not started)**. The channel is now **Instagram**, not
+> Telegram — read every "Telegram" in the diagrams below as the provider-agnostic
+> messaging abstraction (Instagram is the primary channel). Most importantly,
+> **Workflow 1 (the incoming-message handler) was never built as an n8n flow** —
+> that pipeline runs **in-process inside Next.js** via an `after()` callback
+> (`processInboundMessage`, `src/lib/ai/process.ts`); `07_AI_PIPELINE.md` is
+> authoritative. Workflow 1 below is retained only as an **aspirational /
+> optional external-orchestration design**, not current reality.
+
 ---
 
 ## Workflow Overview
 
-| # | Workflow | Trigger | AI Required | Priority |
-|---|---------|---------|-------------|----------|
-| 1 | Incoming Message Handler | Webhook (Telegram) | Yes (conditional) | Critical — MVP |
-| 2 | Order Status Notifications | Supabase webhook | No | Critical — MVP |
-| 3 | Customer Wait Time Monitor | Cron (every 5 min) | No | Critical — MVP |
-| 4 | Low Stock Alert | Supabase webhook | No | Important — MVP |
-| 5 | Stale Order Escalation | Cron (every 30 min) | No | Important — MVP |
-| 6 | Daily Summary | Cron (end of day) | Yes | Phase 2 |
+| # | Workflow | Trigger | AI Required | Status |
+|---|---------|---------|-------------|--------|
+| 1 | Incoming Message Handler | Webhook (Instagram) | Yes (conditional) | **Not an n8n flow — runs in-process in Next.js (see `07_AI_PIPELINE.md`)** |
+| 2 | Order Status Notifications | Supabase webhook | No | Phase 6 — not built |
+| 3 | Customer Wait Time Monitor | Cron (every 5 min) | No | Phase 6 — not built |
+| 4 | Low Stock Alert | Supabase webhook | No | Phase 6 — not built |
+| 5 | Stale Order Escalation | Cron (every 30 min) | No | Phase 6 — not built |
+| 6 | Daily Summary | Cron (end of day) | Yes | Phase 2/6 — not built |
 
 ---
 
 ## Workflow 1: Incoming Message Handler
 
-**This is Mo'een's heartbeat.** Every customer message flows through this workflow.
+> ⚠️ **NOT THE CURRENT IMPLEMENTATION.** This n8n flow was never built. The live
+> incoming-message pipeline runs **in-process inside Next.js** —
+> `processInboundMessage` (`src/lib/ai/process.ts`), scheduled on an `after()`
+> callback from `/api/webhooks/instagram`. The real pipeline also does things
+> this sketch predates: an **8s burst debounce** (last-message-wins), a
+> **deterministic validation** pass over Gemini's output, an **`ai_proposal`**
+> draft state for below-threshold orders, an **`ai_decisions`** audit row per
+> Gemini call, and content-window order dedup. `07_AI_PIPELINE.md` is
+> authoritative. The section below is retained only as an **optional /
+> aspirational** design for orchestrating the same steps externally in n8n.
 
-**Trigger:** Telegram Bot API webhook → n8n webhook node
+**This is Mo'een's heartbeat.** Every customer message flows through this pipeline.
 
-**Flow:**
+**Trigger (actual):** `/api/webhooks/instagram` → Next.js `after()` → `processInboundMessage`
+**Trigger (aspirational n8n version):** Instagram Messaging webhook → n8n webhook node
+
+**Flow (aspirational sketch — see `07` for the real flow):**
 
 ```
-Telegram Webhook
+Instagram Webhook (aspirational; actual = Next.js after())
     │
     ▼
 Parse Message
@@ -34,7 +56,7 @@ Parse Message
     │
     ▼
 Find or Create Customer
-    │ Query Supabase: customers WHERE platform='telegram' AND platform_user_id=chat_id
+    │ Query Supabase: customers WHERE platform='instagram' AND platform_user_id=chat_id
     │ If not found → INSERT new customer
     │
     ▼
@@ -68,7 +90,7 @@ RegEx Pre-Filter
         │
         ▼
     Build Gemini Context
-        │ Fetch: last 5-6 messages from this conversation
+        │ Fetch: last 6 messages from this conversation
         │ Fetch: merchant's product catalog (compressed format)
         │ Fetch: merchant's AI settings (confidence threshold, handoff message)
         │
@@ -91,21 +113,21 @@ RegEx Pre-Filter
         │   │   │ INSERT order_timeline entry
         │   │   └── Done. Dashboard updates via Supabase Realtime.
         │   │
-        │   ├── intent = "order" AND confidence < threshold
+        │   ├── intent = "order" AND confidence < threshold   (actual pipeline = Case D)
         │   │   │
         │   │   ▼
-        │   │   Create Order + Flag
-        │   │   │ INSERT order (same as above)
+        │   │   Create AI Proposal + Flag + Handoff
+        │   │   │ INSERT order (status: 'ai_proposal' — NOT a live order)
         │   │   │ INSERT flag (priority: 'medium', category: 'ai_low_confidence')
-        │   │   │ Flag description: AI's best guess + what it's unsure about
-        │   │   └── Done. Merchant sees order + flag.
+        │   │   │ Send handoff message to customer
+        │   │   └── Merchant confirms (-> incoming) or rejects (-> cancelled).
         │   │
         │   ├── intent = "order" AND missing_fields present AND confidence >= threshold
         │   │   │
         │   │   ▼
         │   │   Send Clarifying Question
         │   │   │ Gemini provides a natural clarifying question
-        │   │   │ Send via Telegram (outbound message, sender_type: 'ai')
+        │   │   │ Send via the channel provider — Instagram (outbound message, sender_type: 'ai')
         │   │   │ Save outbound message in messages table
         │   │   └── Wait for customer reply (next webhook trigger restarts flow)
         │   │
@@ -114,16 +136,17 @@ RegEx Pre-Filter
         │   │   ▼
         │   │   Flag for Human
         │   │   │ INSERT flag (priority: 'medium', category: 'ai_low_confidence')
-        │   │   │ Send handoff message to customer via Telegram
+        │   │   │ Send handoff message to customer via the channel provider (Instagram)
         │   │   │ "A team member will assist you shortly."
         │   │   └── Merchant handles manually.
         │   │
-        │   ├── intent = "question" (not an order — customer asking about price, availability, etc.)
+        │   ├── intent = "question" (customer asking about price, availability, etc.)
         │   │   │
         │   │   ▼
-        │   │   Flag as Question
-        │   │   │ INSERT flag (priority: 'low', category: 'customer_question')
-        │   │   └── Merchant sees it in flags. No order created.
+        │   │   Answer or Flag   (actual pipeline)
+        │   │   │ If Gemini returned an "answer" → send it (sender_type: 'ai') — question_answered
+        │   │   │ Else INSERT flag (priority: 'low', category: 'customer_waiting') — question_flagged
+        │   │   └── No order created.
         │   │
         │   └── intent = "other" (greeting, thanks, general chat)
         │       └── No action. Message is saved in conversation. No flag, no order.
@@ -140,7 +163,7 @@ RegEx Pre-Filter
                 │ Flag title: "AI processing unavailable — manual review needed"
                 │ Flag links to the specific message
                 │
-                │ If 3+ failures in last 5 minutes:
+                │ If 3+ failures in last 5 minutes:   (PLANNED — see notes below)
                 │   Update merchant_settings: ai_status = 'paused'
                 │   (Frontend shows banner: "AI processing is temporarily paused")
                 │
@@ -152,6 +175,8 @@ RegEx Pre-Filter
 - The RegEx pre-filter is intentionally generous — it's better to send a non-order to Gemini (wasted API call) than to miss a real order
 - Clarifying questions are sent automatically only if `ai_auto_clarify` is enabled in merchant settings
 - The merchant can disable auto-clarify, in which case all uncertain messages become flags
+- **The actual pipeline (`process.ts`) differs from this sketch** and is authoritative (`07_AI_PIPELINE.md`): it debounces bursts (8s, last-message-wins), validates Gemini's output deterministically before any order is written, parks below-threshold orders as `ai_proposal` drafts (not live orders), dedups orders per source message, and writes one `ai_decisions` audit row per Gemini call.
+- **The `ai_status` circuit breaker is built** (migration 018 + `process.ts`): 3 `ai_unavailable` failures in 5 min trips it, fast-failing order signals for a 10-min cooldown before a half-open probe; any Gemini success resets it. Only the merchant-facing "AI paused" banner UI remains planned.
 
 ---
 
@@ -170,26 +195,26 @@ Determine New Status
     ├── status = 'confirmed'
     │   │ Template: "Your order {order_number} has been confirmed! We're preparing it now."
     │   │ Arabic: "تم تأكيد طلبك {order_number}! جاري التحضير."
-    │   └── Send via Telegram to customer
+    │   └── Send via the channel provider (Instagram) to customer
     │
     ├── status = 'out_for_delivery'
     │   │ Template: "Your order {order_number} is on its way!"
     │   │ Arabic: "طلبك {order_number} في الطريق إليك!"
-    │   └── Send via Telegram to customer
+    │   └── Send via the channel provider (Instagram) to customer
     │
     ├── status = 'delivered'
     │   │ Template: "Your order {order_number} has been delivered. Thank you!"
     │   │ Arabic: "تم توصيل طلبك {order_number}. شكراً لك!"
     │   │ Optional: "How was your experience?" feedback prompt
-    │   └── Send via Telegram to customer
+    │   └── Send via the channel provider (Instagram) to customer
     │
     └── status = 'cancelled'
         │ Template: "Your order {order_number} has been cancelled. Please contact us if you have questions."
-        └── Send via Telegram to customer
+        └── Send via the channel provider (Instagram) to customer
 ```
 
 **Notes:**
-- Messages sent via the messaging abstraction layer (Telegram for MVP)
+- Messages sent via the provider-agnostic messaging abstraction (Instagram is the primary channel)
 - Each outbound message saved in messages table (sender_type: 'system')
 - Respect merchant's quiet hours — if in quiet hours, queue the notification
 - Language detection: if conversation history is primarily Arabic, send Arabic template
@@ -326,8 +351,8 @@ Send to Gemini
     │ Include: aggregated data above
     │
     ▼
-Send Summary via Telegram
-    │ Direct message to merchant's Telegram
+Send Summary via the messaging abstraction (Instagram)
+    │ Direct message to the merchant
     │ Format: natural language, with key numbers highlighted
     │
     Example:
@@ -352,7 +377,7 @@ All workflows interact with Supabase via:
 2. `products` table → on UPDATE (quantity_total, quantity_reserved) → triggers Workflow 4
 
 **n8n Webhook URLs to configure:**
-1. Telegram Bot webhook URL → points to n8n Workflow 1 webhook node
+1. (Workflow 1 is **not** an n8n flow — inbound Instagram messages are handled in-process by Next.js at `/api/webhooks/instagram`; no n8n webhook is needed)
 2. Supabase order status webhook → points to n8n Workflow 2 webhook node
 3. Supabase inventory webhook → points to n8n Workflow 4 webhook node
 
@@ -361,7 +386,7 @@ All workflows interact with Supabase via:
 ## Error Handling Across All Workflows
 
 - Every workflow has an error handler node that logs failures to a `workflow_errors` table in Supabase
-- Critical workflow failures (Workflow 1, 2) send an alert to the merchant via Telegram
+- Critical workflow failures (Workflow 2) send an alert to the merchant via the messaging abstraction (Instagram)
 - Non-critical failures are logged but don't alert
-- All external API calls (Gemini, Telegram) have retry logic: 1 retry after 5 seconds
+- All external API calls (Gemini, Instagram) have retry logic: 1 retry after 5 seconds
 - If Supabase itself is unreachable, n8n queues the operation and retries every minute
