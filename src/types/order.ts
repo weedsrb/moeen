@@ -52,3 +52,54 @@ export interface OrderTimelineEntry {
   note: string | null;
   created_at: string;
 }
+
+export interface OrderCustomerLite {
+  id: string;
+  name: string | null;
+  phone: string | null;
+  platform: string;
+}
+
+export interface OrderWithCustomer extends Order {
+  customers: OrderCustomerLite | null;
+  order_items: OrderItem[];
+}
+
+export interface OrderDetail extends OrderWithCustomer {
+  order_timeline: OrderTimelineEntry[];
+}
+
+export interface OrderBoardColumn {
+  status: OrderStatus;
+  orders: OrderWithCustomer[];
+}
+
+export const ORDER_BOARD_STATUSES: OrderStatus[] = [
+  "incoming",
+  "pending",
+  "confirmed",
+  "out_for_delivery",
+  "delivered",
+];
+
+export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
+  incoming: "Incoming",
+  pending: "Pending",
+  confirmed: "Confirmed",
+  out_for_delivery: "Out for Delivery",
+  delivered: "Delivered",
+  cancelled: "Cancelled",
+};
+
+export const ORDER_ALLOWED_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
+  incoming: ["pending", "confirmed", "cancelled"],
+  pending: ["confirmed", "cancelled", "incoming"],
+  confirmed: ["out_for_delivery", "cancelled"],
+  out_for_delivery: ["delivered", "cancelled"],
+  delivered: [],
+  cancelled: [],
+};
+
+export function canTransition(from: OrderStatus, to: OrderStatus): boolean {
+  return ORDER_ALLOWED_TRANSITIONS[from].includes(to);
+}

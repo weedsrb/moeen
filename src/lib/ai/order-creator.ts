@@ -24,13 +24,10 @@ export async function createOrderFromAI(
   const { merchantId, customerId, conversationId, messageId, geminiResponse } =
     params;
 
-  // Generate order number: MO-000001
-  const { count } = await supabase
-    .from("orders")
-    .select("*", { count: "exact", head: true })
-    .eq("merchant_id", merchantId);
-
-  const orderNumber = `MO-${String((count ?? 0) + 1).padStart(6, "0")}`;
+  const { data: numberData } = await supabase.rpc("generate_order_number", {
+    p_merchant_id: merchantId,
+  });
+  const orderNumber = numberData as string;
 
   // Calculate totals from items
   const subtotal = geminiResponse.items.reduce(
