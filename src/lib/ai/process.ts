@@ -1,10 +1,12 @@
+import { createHash } from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getProvider, isWindowExpiredError } from "@/lib/messaging";
 import { shouldProcess } from "./regex-filter";
 import { assembleContext } from "./context";
-import { callGemini } from "./gemini";
+import { callGemini, AI_CONFIG } from "./gemini";
 import { createOrderFromAI } from "./order-creator";
 import type { PipelineInput, GeminiResponse } from "./types";
+import type { ValidationDiagnostics } from "./validate-extraction";
 
 /**
  * How long the pipeline waits before processing an inbound message, so a
@@ -170,6 +172,11 @@ export async function processInboundMessage(
       return;
     }
 
+    // Hash the effective (burst-coalesced) content once. Every ai_decisions
+    // audit row for this run is keyed by it, so identical inputs across runs
+    // (e.g. re-scored after a prompt bump) stay comparable.
+    const inputHash = createHash("sha256").update(effectiveContent).digest("hex");
+
     // --- Step 3: Call Gemini (with 1 retry) ---
     let geminiResponse: GeminiResponse;
     try {
@@ -215,6 +222,14 @@ export async function processInboundMessage(
           .from("messages")
           .update({ ai_processed: true })
           .in("id", burstIds);
+        await recordDecision(supabase, {
+          merchantId,
+          conversationId,
+          messageId,
+          inputHash,
+          decisionCase: "ai_unavailable",
+          geminiConfidence: null,
+        });
         return;
       }
     }
@@ -246,6 +261,14 @@ export async function processInboundMessage(
 
     if (geminiResponse.intent === "other") {
       console.log(`${tag} | action | intent=other → no action`);
+      await recordDecision(supabase, {
+        merchantId,
+        conversationId,
+        messageId,
+        inputHash,
+        decisionCase: "intent_other",
+        geminiConfidence: geminiResponse.confidence,
+      });
       return;
     }
 
@@ -262,6 +285,14 @@ export async function processInboundMessage(
           credentials,
           geminiResponse.answer
         );
+        await recordDecision(supabase, {
+          merchantId,
+          conversationId,
+          messageId,
+          inputHash,
+          decisionCase: "question_answered",
+          geminiConfidence: geminiResponse.confidence,
+        });
       } else {
         console.log(`${tag} | action | intent=question → flag (customer_waiting, no answer generated)`);
         await supabase.from("flags").insert({
@@ -273,6 +304,14 @@ export async function processInboundMessage(
           title: "Customer question needs response",
           description: geminiResponse.reasoning,
           recommended_action: "Reply to the customer's question.",
+        });
+        await recordDecision(supabase, {
+          merchantId,
+          conversationId,
+          messageId,
+          inputHash,
+          decisionCase: "question_flagged",
+          geminiConfidence: geminiResponse.confidence,
         });
       }
       return;
@@ -307,6 +346,16 @@ export async function processInboundMessage(
         messageId,
         invalidProductIds: diagnostics.invalidProductIds,
       });
+      await recordDecision(supabase, {
+        merchantId,
+        conversationId,
+        messageId,
+        inputHash,
+        decisionCase: "order_auto_created",
+        geminiConfidence: geminiResponse.confidence,
+        orderId,
+        validationDiagnostics: diagnostics,
+      });
       console.log(`${tag} | action | Case A → order created: ${orderNumber}`);
       return;
     }
@@ -327,6 +376,14 @@ export async function processInboundMessage(
         );
         console.log(`${tag} | action | clarifying question sent via ${platform}`);
       }
+      await recordDecision(supabase, {
+        merchantId,
+        conversationId,
+        messageId,
+        inputHash,
+        decisionCase: "order_clarify_sent",
+        geminiConfidence: geminiResponse.confidence,
+      });
       return;
     }
 
@@ -362,6 +419,16 @@ export async function processInboundMessage(
         conversationId,
         messageId,
         invalidProductIds: diagnostics.invalidProductIds,
+      });
+      await recordDecision(supabase, {
+        merchantId,
+        conversationId,
+        messageId,
+        inputHash,
+        decisionCase: "order_created_flagged",
+        geminiConfidence: geminiResponse.confidence,
+        orderId,
+        validationDiagnostics: diagnostics,
       });
       console.log(`${tag} | action | Case C → order ${orderNumber} + flag (missing fields)`);
       return;
@@ -416,9 +483,78 @@ export async function processInboundMessage(
       credentials,
       settings.handoffMessage
     );
+    await recordDecision(supabase, {
+      merchantId,
+      conversationId,
+      messageId,
+      inputHash,
+      decisionCase: "order_proposal_created",
+      geminiConfidence: geminiResponse.confidence,
+      orderId,
+      validationDiagnostics: diagnostics,
+    });
     console.log(`${tag} | action | Case D → AI proposal ${orderNumber} + flag + handoff sent`);
   } catch (err) {
     console.error(`${tag} | ERROR |`, err);
+  }
+}
+
+/**
+ * Insert one immutable `ai_decisions` audit row attributing this pipeline run
+ * to an exact model/prompt revision and its terminal decision. Fire-and-forget:
+ * any failure is logged and swallowed — auditing must NEVER break the pipeline.
+ *
+ * Called only at the post-Gemini terminal points (one row per Gemini call), so
+ * audit volume tracks AI spend, not raw chat volume. `effective_confidence`
+ * mirrors the raw model score today; it is reserved for a future deterministic
+ * re-scoring layer.
+ */
+async function recordDecision(
+  supabase: ReturnType<typeof createAdminClient>,
+  params: {
+    merchantId: string;
+    conversationId: string;
+    messageId: string;
+    inputHash: string;
+    decisionCase:
+      | "ai_unavailable"
+      | "intent_other"
+      | "question_answered"
+      | "question_flagged"
+      | "order_auto_created"
+      | "order_clarify_sent"
+      | "order_created_flagged"
+      | "order_proposal_created";
+    geminiConfidence: number | null;
+    orderId?: string | null;
+    validationDiagnostics?: ValidationDiagnostics | null;
+  }
+): Promise<void> {
+  try {
+    const { error } = await supabase.from("ai_decisions").insert({
+      merchant_id: params.merchantId,
+      conversation_id: params.conversationId,
+      message_id: params.messageId,
+      order_id: params.orderId ?? null,
+      model_version: AI_CONFIG.model,
+      prompt_version: AI_CONFIG.promptVersion,
+      input_hash: params.inputHash,
+      gemini_confidence: params.geminiConfidence,
+      // Equals the raw model score today; reserved for deterministic re-scoring.
+      effective_confidence: params.geminiConfidence,
+      decision_case: params.decisionCase,
+      validation_diagnostics: params.validationDiagnostics ?? null,
+    });
+    if (error) {
+      console.error(
+        `[AI Pipeline] recordDecision | insert failed (${params.decisionCase}): ${error.message}`
+      );
+    }
+  } catch (err) {
+    console.error(
+      `[AI Pipeline] recordDecision | unexpected error (${params.decisionCase}):`,
+      err
+    );
   }
 }
 
