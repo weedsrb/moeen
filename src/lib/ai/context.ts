@@ -110,6 +110,8 @@ export async function assembleContext(
     personaName: s?.ai_persona_name ?? null,
     tone: s?.ai_tone ?? "friendly",
     greeting: s?.ai_greeting ?? null,
+    businessContext: s?.ai_business_context ?? null,
+    customInstructions: s?.ai_custom_instructions ?? null,
     responseLanguage: s?.ai_response_language ?? "auto",
     autoAcknowledge: s?.ai_auto_acknowledge ?? false,
     acknowledgeTemplate: s?.ai_acknowledge_template ?? null,
@@ -134,8 +136,8 @@ function buildMerchantContext(
     personaName: string | null;
     tone: string;
     greeting: string | null;
-    businessContext?: string | null;
-    customInstructions?: string | null;
+    businessContext: string | null;
+    customInstructions: string | null;
     responseLanguage: string;
   },
   faq: Array<{ question: string; answer: string }>

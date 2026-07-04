@@ -74,6 +74,8 @@ export interface AssembledContext {
     personaName: string | null;
     tone: string;
     greeting: string | null;
+    businessContext: string | null;
+    customInstructions: string | null;
     responseLanguage: string;
     autoAcknowledge: boolean;
     acknowledgeTemplate: string | null;
