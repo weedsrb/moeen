@@ -4,6 +4,12 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { useUnreadCount } from "@/components/layout/unread-count-provider";
+import { useOrdersCount } from "@/components/layout/orders-count-provider";
+import {
+  useFlagsCount,
+  useHighestFlagPriority,
+} from "@/components/layout/flags-count-provider";
+import { flagBadgeColorClass } from "@/lib/utils/flags";
 import {
   LayoutDashboard,
   MessageSquare,
@@ -25,6 +31,9 @@ const navItems = [
 export function MobileNav() {
   const pathname = usePathname();
   const unreadCount = useUnreadCount();
+  const ordersCount = useOrdersCount();
+  const flagsCount = useFlagsCount();
+  const flagsPriority = useHighestFlagPriority();
 
   return (
     <nav className="sm:hidden fixed bottom-0 inset-x-0 z-50 bg-card border-t border-border pb-[env(safe-area-inset-bottom)]">
@@ -33,6 +42,8 @@ export function MobileNav() {
           const isActive = pathname === item.href;
           const Icon = item.icon;
           const isMessages = item.href === "/conversations";
+          const isOrders = item.href === "/orders";
+          const isFlags = item.href === "/flags";
 
           return (
             <Link
@@ -50,6 +61,21 @@ export function MobileNav() {
                 {isMessages && unreadCount > 0 && (
                   <span className="absolute -top-1 -end-1 h-4 min-w-4 flex items-center justify-center rounded-full bg-primary text-primary-foreground text-[9px] px-1">
                     {unreadCount > 99 ? "99+" : unreadCount}
+                  </span>
+                )}
+                {isOrders && ordersCount > 0 && (
+                  <span className="absolute -top-1 -end-1 h-4 min-w-4 flex items-center justify-center rounded-full bg-primary text-primary-foreground text-[9px] px-1">
+                    {ordersCount > 99 ? "99+" : ordersCount}
+                  </span>
+                )}
+                {isFlags && flagsCount > 0 && (
+                  <span
+                    className={cn(
+                      "absolute -top-1 -end-1 h-4 min-w-4 flex items-center justify-center rounded-full text-[9px] px-1",
+                      flagBadgeColorClass(flagsPriority)
+                    )}
+                  >
+                    {flagsCount > 99 ? "99+" : flagsCount}
                   </span>
                 )}
               </div>
