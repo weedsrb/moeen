@@ -7,6 +7,18 @@ import { createOrderFromAI } from "./order-creator";
 import type { PipelineInput, GeminiResponse } from "./types";
 
 /**
+ * How long the pipeline waits before processing an inbound message, so a
+ * customer who splits one order across several rapid messages
+ * ("بدي" / "3 كيلو" / "العنوان رام الله") gets a single coalesced run instead
+ * of one Gemini call (and possibly one order) per fragment. Dev-owned.
+ */
+const DEBOUNCE_MS = 8_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
  * Main AI pipeline orchestrator.
  * Called via `after()` from the webhook — runs in the background after
  * the webhook has already returned 200 to Meta.
@@ -25,6 +37,8 @@ export async function processInboundMessage(
     chatId,
     platform,
     credentials,
+    messageCreatedAt,
+    skipDebounce,
   } = input;
 
   const supabase = createAdminClient();
@@ -33,24 +47,90 @@ export async function processInboundMessage(
   try {
     console.log(`${tag} | START | "${content.slice(0, 80)}"`);
 
+    // --- Step 0: Burst debounce (last-message-wins) ---
+    // Each rapid fragment schedules its own pipeline run. We sleep briefly;
+    // only the LAST message of a burst proceeds and runs the pipeline over the
+    // concatenated text, while earlier messages detect a successor and yield
+    // (the successor's run owns the whole burst). The reprocess endpoint skips
+    // this — it runs inline on a single historical message.
+    let effectiveContent = content;
+    let burstIds: string[] = [messageId];
+
+    if (!skipDebounce) {
+      await sleep(DEBOUNCE_MS);
+
+      // Successor check: is there a newer inbound *text* message (the only kind
+      // that runs this pipeline) in this conversation? Ordering by
+      // (created_at, id) desc picks the single true "last" message and breaks
+      // the theoretical tie of two messages sharing a created_at (higher id
+      // wins). If the latest isn't us, a successor exists → yield WITHOUT
+      // marking anything processed.
+      const { data: latestInbound } = await supabase
+        .from("messages")
+        .select("id")
+        .eq("conversation_id", conversationId)
+        .eq("direction", "inbound")
+        .eq("message_type", "text")
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (latestInbound && latestInbound.id !== messageId) {
+        console.log(`${tag} | debounce | superseded by newer message → yield`);
+        return;
+      }
+
+      // Burst gather: the trailing run of unprocessed inbound text messages,
+      // bounded to the last 5 minutes and 10 rows so we never swallow ancient
+      // unprocessed rows. Concatenate oldest→newest into effectiveContent.
+      const burstWindowStart = new Date(
+        new Date(messageCreatedAt).getTime() - 5 * 60_000
+      ).toISOString();
+      const { data: burst } = await supabase
+        .from("messages")
+        .select("id, content")
+        .eq("conversation_id", conversationId)
+        .eq("direction", "inbound")
+        .eq("message_type", "text")
+        .eq("ai_processed", false)
+        .gte("created_at", burstWindowStart)
+        .order("created_at", { ascending: true })
+        .limit(10);
+
+      if (burst && burst.length > 0) {
+        burstIds = burst.map((m) => m.id);
+        effectiveContent = burst.map((m) => m.content).join("\n");
+        // The triggering message must always be part of the burst.
+        if (!burstIds.includes(messageId)) {
+          burstIds.push(messageId);
+          effectiveContent = `${effectiveContent}\n${content}`;
+        }
+      }
+
+      console.log(
+        `${tag} | debounce | burst of ${burstIds.length} message(s) → "${effectiveContent.slice(0, 80)}"`
+      );
+    }
+
     // --- Step 1: Assemble context (includes last outbound sender type) ---
     const context = await assembleContext(
       supabase,
       merchantId,
       conversationId,
-      content
+      effectiveContent
     );
     console.log(
       `${tag} | context | ${context.conversationHistory.split("\n").length} messages, ${context.catalog.length} products, lastOutbound=${context.lastOutboundSenderType ?? "none"}`
     );
 
     // --- Step 2: RegEx pre-filter ---
-    if (!shouldProcess(content, context.lastOutboundSenderType)) {
+    if (!shouldProcess(effectiveContent, context.lastOutboundSenderType)) {
       console.log(`${tag} | regex | NO signal → skip AI`);
       await supabase
         .from("messages")
         .update({ has_order_signal: false, ai_processed: true })
-        .eq("id", messageId);
+        .in("id", burstIds);
       return;
     }
     console.log(`${tag} | regex | signal DETECTED → calling Gemini`);
@@ -59,7 +139,7 @@ export async function processInboundMessage(
     await supabase
       .from("messages")
       .update({ has_order_signal: true })
-      .eq("id", messageId);
+      .in("id", burstIds);
 
     // --- Step 2b: Content-window dedup ---
     // A customer double-sending identical text produces distinct
@@ -74,7 +154,7 @@ export async function processInboundMessage(
       .select("id")
       .eq("conversation_id", conversationId)
       .eq("direction", "inbound")
-      .eq("content", content)
+      .eq("content", effectiveContent)
       .eq("ai_processed", true)
       .neq("id", messageId)
       .gte("created_at", windowStart)
@@ -86,7 +166,7 @@ export async function processInboundMessage(
       await supabase
         .from("messages")
         .update({ ai_processed: true })
-        .eq("id", messageId);
+        .in("id", burstIds);
       return;
     }
 
@@ -100,7 +180,7 @@ export async function processInboundMessage(
           confidenceThreshold: context.settings.confidenceThreshold,
           currency: context.settings.currency,
         },
-        content,
+        effectiveContent,
         context.merchantContext
       );
     } catch (firstError) {
@@ -113,7 +193,7 @@ export async function processInboundMessage(
             confidenceThreshold: context.settings.confidenceThreshold,
             currency: context.settings.currency,
           },
-          content,
+          effectiveContent,
           context.merchantContext
         );
       } catch (secondError) {
@@ -134,7 +214,7 @@ export async function processInboundMessage(
         await supabase
           .from("messages")
           .update({ ai_processed: true })
-          .eq("id", messageId);
+          .in("id", burstIds);
         return;
       }
     }
@@ -150,12 +230,15 @@ export async function processInboundMessage(
       console.log(`${tag} | gemini | clarifying_question: ${geminiResponse.clarifying_question.slice(0, 150)}`);
     }
 
+    // ai_processed applies to the whole burst; ai_result (the extraction) is
+    // written only to the triggering (latest) message.
     await supabase
       .from("messages")
-      .update({
-        ai_processed: true,
-        ai_result: geminiResponse as Record<string, unknown>,
-      })
+      .update({ ai_processed: true })
+      .in("id", burstIds);
+    await supabase
+      .from("messages")
+      .update({ ai_result: geminiResponse as Record<string, unknown> })
       .eq("id", messageId);
 
     // --- Step 5: Decision tree ---

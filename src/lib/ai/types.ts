@@ -48,6 +48,12 @@ export interface PipelineInput {
   platform: string;
   /** Opaque per-provider credentials consumed by getProvider(platform, credentials). */
   credentials: Record<string, string>;
+  /** ISO timestamp of the triggering message's created_at — anchors the burst
+   *  debounce window and (implicitly) the last-message-wins successor check. */
+  messageCreatedAt: string;
+  /** Skip burst debounce (sleep + successor check + gather). Set by the
+   *  reprocess endpoint, which runs inline on a single historical message. */
+  skipDebounce?: boolean;
 }
 
 // --- Compressed Catalog ---
