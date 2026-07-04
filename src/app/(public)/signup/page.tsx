@@ -19,6 +19,14 @@ import { Mail, Phone, Eye, EyeOff, Loader2 } from "lucide-react";
 
 type AuthMode = "email" | "phone" | "phone-verify";
 
+function getAuthErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return "Unable to reach the authentication service. Check your connection and Supabase configuration.";
+}
+
 export default function SignupPage() {
   const router = useRouter();
   const supabase = createClient();
@@ -59,16 +67,22 @@ export default function SignupPage() {
 
     setLoading(true);
 
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        emailRedirectTo: `${window.location.origin}/api/auth/callback`,
-      },
-    });
+    try {
+      const { error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          emailRedirectTo: `${window.location.origin}/api/auth/callback`,
+        },
+      });
 
-    if (error) {
-      setError(error.message);
+      if (error) {
+        setError(error.message);
+        setLoading(false);
+        return;
+      }
+    } catch (error) {
+      setError(getAuthErrorMessage(error));
       setLoading(false);
       return;
     }
