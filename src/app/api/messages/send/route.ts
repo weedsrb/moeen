@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { getProvider } from "@/lib/messaging";
+import { getProvider, isWindowExpiredError } from "@/lib/messaging";
 import { InstagramProvider } from "@/lib/messaging/instagram";
 import { getMerchantCredentials } from "@/lib/messaging/credentials";
 import { sendMessageSchema } from "@/lib/validations/messaging";
@@ -52,19 +52,27 @@ export async function POST(request: NextRequest) {
 
   const provider = getProvider(conversation.platform, credentials);
 
-  // Merchant (human) replies may use the HUMAN_AGENT tag to send within
-  // Instagram's extended 7-day window. AI sends never use this tag.
-  const result =
+  // Send normally first (works within the 24h standard window). The
+  // HUMAN_AGENT tag extends merchant (human) replies to a 7-day window, but
+  // it's a separately Meta-reviewed feature — only attempt it as a fallback
+  // once we know the standard window has actually expired. AI sends never
+  // use this tag.
+  let result = await provider.sendMessage(
+    conversation.platform_chat_id,
+    parsed.data.content
+  );
+
+  if (
+    !result.success &&
+    isWindowExpiredError(result.error) &&
     provider instanceof InstagramProvider
-      ? await provider.sendMessage(
-          conversation.platform_chat_id,
-          parsed.data.content,
-          { humanAgentTag: true }
-        )
-      : await provider.sendMessage(
-          conversation.platform_chat_id,
-          parsed.data.content
-        );
+  ) {
+    result = await provider.sendMessage(
+      conversation.platform_chat_id,
+      parsed.data.content,
+      { humanAgentTag: true }
+    );
+  }
 
   if (!result.success) {
     return NextResponse.json(
