@@ -19,7 +19,7 @@ export default function ConversationsLoading() {
           ))}
         </div>
         {/* Chat panel skeleton */}
-        <div className="flex-1 hidden sm:flex flex-col items-center justify-center">
+        <div className="flex-1 hidden sm:flex flex-col items-center justify-center sm:border-l border-border">
           <Skeleton variant="shimmer" className="h-5 w-56" />
         </div>
       </div>

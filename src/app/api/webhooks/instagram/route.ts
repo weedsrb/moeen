@@ -98,18 +98,29 @@ export async function POST(request: NextRequest) {
         );
         const customerName = profile?.name ?? profile?.username ?? `@${parsed.senderId}`;
 
-        // Find or create customer
+        // Find or create customer. Only overwrite avatar_url when we actually
+        // resolved one, so a transient profile fetch failure doesn't wipe it.
+        const customerRow: {
+          merchant_id: string;
+          platform: string;
+          platform_user_id: string;
+          name: string;
+          avatar_url?: string;
+        } = {
+          merchant_id: merchantId,
+          platform: "instagram",
+          platform_user_id: parsed.senderId,
+          name: customerName,
+        };
+        if (profile?.profile_pic) {
+          customerRow.avatar_url = profile.profile_pic;
+        }
+
         const { data: customer, error: customerErr } = await supabase
           .from("customers")
-          .upsert(
-            {
-              merchant_id: merchantId,
-              platform: "instagram",
-              platform_user_id: parsed.senderId,
-              name: customerName,
-            },
-            { onConflict: "merchant_id,platform,platform_user_id" }
-          )
+          .upsert(customerRow, {
+            onConflict: "merchant_id,platform,platform_user_id",
+          })
           .select("id")
           .single();
 

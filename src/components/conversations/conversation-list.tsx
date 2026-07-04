@@ -8,7 +8,7 @@ import { MessageSquare, Search } from "lucide-react";
 import type { Conversation, Customer } from "@/types/message";
 
 export interface ConversationWithCustomer extends Conversation {
-  customers: Pick<Customer, "name" | "platform_user_id"> | null;
+  customers: Pick<Customer, "name" | "platform_user_id" | "avatar_url"> | null;
 }
 
 interface ConversationListProps {
@@ -101,8 +101,19 @@ export function ConversationList({
               )}
             >
               {/* Avatar */}
-              <div className="h-10 w-10 rounded-full bg-blue-500/10 text-blue-500 flex items-center justify-center text-sm font-medium shrink-0">
+              <div className="relative h-10 w-10 rounded-full bg-blue-500/10 text-blue-500 flex items-center justify-center text-sm font-medium shrink-0 overflow-hidden">
                 {getInitials(customerName)}
+                {conversation.customers?.avatar_url && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={conversation.customers.avatar_url}
+                    alt=""
+                    className="absolute inset-0 h-full w-full object-cover"
+                    onError={(e) => {
+                      e.currentTarget.style.display = "none";
+                    }}
+                  />
+                )}
               </div>
 
               {/* Content */}

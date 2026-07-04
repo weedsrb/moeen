@@ -192,19 +192,21 @@ export class InstagramProvider implements MessagingProvider {
     accessToken: string
   ): Promise<InstagramProfile | null> {
     const res = await fetch(
-      `${GRAPH_API_BASE}/${igsid}?fields=name,username&access_token=${accessToken}`
+      `${GRAPH_API_BASE}/${igsid}?fields=name,username,profile_pic&access_token=${accessToken}`
     );
     if (!res.ok) return null;
     const data = (await res.json()) as {
       id?: string;
       name?: string;
       username?: string;
+      profile_pic?: string;
     };
     if (!data.username) return null;
     return {
       user_id: data.id ?? igsid,
       username: data.username,
       name: data.name,
+      profile_pic: data.profile_pic,
     };
   }
 

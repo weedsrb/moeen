@@ -7,4 +7,7 @@ export interface DashboardMetrics {
   today_messages: number;
   today_orders: number;
   today_delivered: number;
+  yesterday_orders: number;
+  yesterday_delivered: number;
+  yesterday_messages: number;
 }

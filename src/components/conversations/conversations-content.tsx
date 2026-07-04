@@ -77,6 +77,7 @@ export function ConversationsContent({
   }
 
   const customerName = selected?.customers?.name ?? "Unknown";
+  const customerAvatar = selected?.customers?.avatar_url ?? null;
 
   return (
     <div className="flex flex-1 min-h-0 rounded-lg border border-border overflow-hidden bg-card">
@@ -113,13 +114,24 @@ export function ConversationsContent({
               >
                 <ChevronLeft className="h-4 w-4" />
               </Button>
-              <div className="h-8 w-8 rounded-full bg-blue-500/10 text-blue-500 flex items-center justify-center text-xs font-medium">
+              <div className="relative h-8 w-8 rounded-full bg-blue-500/10 text-blue-500 flex items-center justify-center text-xs font-medium overflow-hidden">
                 {customerName
                   .split(" ")
                   .map((w: string) => w[0])
                   .join("")
                   .toUpperCase()
                   .slice(0, 2)}
+                {customerAvatar && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={customerAvatar}
+                    alt=""
+                    className="absolute inset-0 h-full w-full object-cover"
+                    onError={(e) => {
+                      e.currentTarget.style.display = "none";
+                    }}
+                  />
+                )}
               </div>
               <div>
                 <p className="text-sm font-medium">{customerName}</p>
