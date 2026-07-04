@@ -69,4 +69,6 @@ export interface InstagramProfile {
   user_id: string;
   username: string;
   name?: string;
+  /** CDN-hosted profile picture URL; may be absent or expire over time. */
+  profile_pic?: string;
 }

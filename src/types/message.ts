@@ -37,6 +37,7 @@ export interface Customer {
   platform: string;
   platform_user_id: string;
   name: string | null;
+  avatar_url: string | null;
   phone: string | null;
   delivery_address: string | null;
   total_orders: number;
