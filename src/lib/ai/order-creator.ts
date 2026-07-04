@@ -1,5 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { GeminiResponse } from "./types";
+import type { GeminiResponse, CompressedProduct } from "./types";
+import { validateExtraction } from "./validate-extraction";
+import type { ValidationDiagnostics } from "./validate-extraction";
 
 interface CreateOrderParams {
   merchantId: string;
@@ -7,34 +9,69 @@ interface CreateOrderParams {
   conversationId: string;
   messageId: string;
   geminiResponse: GeminiResponse;
+  /** The exact product set sent to Gemini — used to validate product_ids/prices. */
+  catalog: CompressedProduct[];
+  /** Merchant currency from settings — replaces the old hardcoded "ILS". */
+  currency: string;
 }
 
 interface CreateOrderResult {
   orderId: string;
   orderNumber: string;
+  /** What deterministic validation had to correct — surfaced by the caller. */
+  diagnostics: ValidationDiagnostics;
 }
 
 /**
  * Create an order + order_items + timeline entry from a Gemini extraction.
+ *
+ * Idempotent at the order level: if an order already exists for this
+ * source message (e.g. the reprocess endpoint re-runs the pipeline), the
+ * existing order is returned instead of creating a duplicate.
  */
 export async function createOrderFromAI(
   supabase: SupabaseClient,
   params: CreateOrderParams
 ): Promise<CreateOrderResult> {
-  const { merchantId, customerId, conversationId, messageId, geminiResponse } =
-    params;
+  const {
+    merchantId,
+    customerId,
+    conversationId,
+    messageId,
+    geminiResponse,
+    catalog,
+    currency,
+  } = params;
+
+  // --- Idempotency: never mint a second order for the same source message ---
+  const { data: existing } = await supabase
+    .from("orders")
+    .select("id, order_number")
+    .eq("merchant_id", merchantId)
+    .eq("source_message_id", messageId)
+    .maybeSingle();
+
+  if (existing) {
+    console.log(
+      "[AI Pipeline] order already exists for message → skipping create"
+    );
+    return {
+      orderId: existing.id,
+      orderNumber: existing.order_number,
+      diagnostics: { invalidProductIds: [], priceCorrections: 0 },
+    };
+  }
+
+  // --- Deterministic validation (Gemini output is untrusted) ---
+  const validation = validateExtraction(geminiResponse, catalog);
 
   const { data: numberData } = await supabase.rpc("generate_order_number", {
     p_merchant_id: merchantId,
   });
   const orderNumber = numberData as string;
 
-  // Calculate totals from items
-  const subtotal = geminiResponse.items.reduce(
-    (sum, item) => sum + (item.subtotal ?? 0),
-    0
-  );
-  const total = geminiResponse.order_total ?? subtotal;
+  // Totals come from the sanitized items, not from Gemini.
+  const { subtotal, total, items: validatedItems, diagnostics } = validation;
 
   // Insert order
   const { data: order, error: orderError } = await supabase
@@ -49,7 +86,7 @@ export async function createOrderFromAI(
         geminiResponse.customer_info.delivery_address ?? null,
       subtotal,
       total,
-      currency: "ILS",
+      currency,
       notes: geminiResponse.reasoning,
       ai_confidence: geminiResponse.confidence,
       ai_extracted: true,
@@ -65,16 +102,16 @@ export async function createOrderFromAI(
   }
 
   // Insert order items
-  if (geminiResponse.items.length > 0) {
-    const items = geminiResponse.items.map((item) => ({
+  if (validatedItems.length > 0) {
+    const items = validatedItems.map((item) => ({
       merchant_id: merchantId,
       order_id: order.id,
       product_id: item.product_id,
       product_name: item.product_name,
       variant: item.variant,
       quantity: item.quantity,
-      unit_price: item.unit_price ?? 0,
-      subtotal: item.subtotal ?? 0,
+      unit_price: item.unit_price,
+      subtotal: item.subtotal,
       ai_confidence: item.match_confidence,
       ai_matched: item.product_id !== null,
     }));
@@ -84,7 +121,21 @@ export async function createOrderFromAI(
       .insert(items);
 
     if (itemsError) {
+      // A live order with zero items is a silent data-loss failure — make it
+      // merchant-visible instead of only logging it.
       console.error("[AI Pipeline] Failed to insert order items:", itemsError);
+      await supabase.from("flags").insert({
+        merchant_id: merchantId,
+        order_id: order.id,
+        conversation_id: conversationId,
+        message_id: messageId,
+        priority: "critical",
+        category: "ai_unavailable",
+        title: "Order created without items",
+        description: `The order was created but its items failed to save. Error: ${itemsError.message}`,
+        recommended_action:
+          "Open the order and add items manually from the conversation.",
+      });
     }
   }
 
@@ -104,5 +155,5 @@ export async function createOrderFromAI(
     console.error("[AI Pipeline] Failed to insert timeline:", timelineError);
   }
 
-  return { orderId: order.id, orderNumber };
+  return { orderId: order.id, orderNumber, diagnostics };
 }

@@ -61,6 +61,35 @@ export async function processInboundMessage(
       .update({ has_order_signal: true })
       .eq("id", messageId);
 
+    // --- Step 2b: Content-window dedup ---
+    // A customer double-sending identical text produces distinct
+    // platform_message_ids (so intake dedup misses it) but should not mint two
+    // orders. If an identical inbound message in this conversation was already
+    // AI-processed within the last 60s, skip this one. 60s is deliberate:
+    // long enough for double-taps, short enough that a genuine repeat order
+    // later still processes.
+    const windowStart = new Date(Date.now() - 60_000).toISOString();
+    const { data: duplicate } = await supabase
+      .from("messages")
+      .select("id")
+      .eq("conversation_id", conversationId)
+      .eq("direction", "inbound")
+      .eq("content", content)
+      .eq("ai_processed", true)
+      .neq("id", messageId)
+      .gte("created_at", windowStart)
+      .limit(1)
+      .maybeSingle();
+
+    if (duplicate) {
+      console.log(`${tag} | duplicate content within window → skip`);
+      await supabase
+        .from("messages")
+        .update({ ai_processed: true })
+        .eq("id", messageId);
+      return;
+    }
+
     // --- Step 3: Call Gemini (with 1 retry) ---
     let geminiResponse: GeminiResponse;
     try {
@@ -176,12 +205,24 @@ export async function processInboundMessage(
 
     if (isAboveThreshold && !hasMissingFields) {
       // Case A: High confidence, complete order → auto-create
-      const { orderNumber } = await createOrderFromAI(supabase, {
+      const { orderId, orderNumber, diagnostics } = await createOrderFromAI(
+        supabase,
+        {
+          merchantId,
+          customerId,
+          conversationId,
+          messageId,
+          geminiResponse,
+          catalog: context.catalog,
+          currency: context.settings.currency,
+        }
+      );
+      await flagInvalidProducts(supabase, {
         merchantId,
-        customerId,
+        orderId,
         conversationId,
         messageId,
-        geminiResponse,
+        invalidProductIds: diagnostics.invalidProductIds,
       });
       console.log(`${tag} | action | Case A → order created: ${orderNumber}`);
       return;
@@ -208,13 +249,18 @@ export async function processInboundMessage(
 
     if (isAboveThreshold && hasMissingFields && !settings.autoClarity) {
       // Case C: High confidence, missing fields, auto-clarify off → create order + flag
-      const { orderId, orderNumber } = await createOrderFromAI(supabase, {
-        merchantId,
-        customerId,
-        conversationId,
-        messageId,
-        geminiResponse,
-      });
+      const { orderId, orderNumber, diagnostics } = await createOrderFromAI(
+        supabase,
+        {
+          merchantId,
+          customerId,
+          conversationId,
+          messageId,
+          geminiResponse,
+          catalog: context.catalog,
+          currency: context.settings.currency,
+        }
+      );
       await supabase.from("flags").insert({
         merchant_id: merchantId,
         order_id: orderId,
@@ -227,18 +273,30 @@ export async function processInboundMessage(
         recommended_action:
           "Review the order and contact the customer for missing information.",
       });
+      await flagInvalidProducts(supabase, {
+        merchantId,
+        orderId,
+        conversationId,
+        messageId,
+        invalidProductIds: diagnostics.invalidProductIds,
+      });
       console.log(`${tag} | action | Case C → order ${orderNumber} + flag (missing fields)`);
       return;
     }
 
     // Case D: Low confidence → create order + flag + send handoff
-    const { orderId, orderNumber } = await createOrderFromAI(supabase, {
-      merchantId,
-      customerId,
-      conversationId,
-      messageId,
-      geminiResponse,
-    });
+    const { orderId, orderNumber, diagnostics } = await createOrderFromAI(
+      supabase,
+      {
+        merchantId,
+        customerId,
+        conversationId,
+        messageId,
+        geminiResponse,
+        catalog: context.catalog,
+        currency: context.settings.currency,
+      }
+    );
 
     await supabase.from("flags").insert({
       merchant_id: merchantId,
@@ -251,6 +309,14 @@ export async function processInboundMessage(
       description: `Confidence: ${(geminiResponse.confidence * 100).toFixed(0)}%. ${geminiResponse.reasoning}`,
       recommended_action:
         "Review the AI extraction and confirm or edit the order.",
+    });
+
+    await flagInvalidProducts(supabase, {
+      merchantId,
+      orderId,
+      conversationId,
+      messageId,
+      invalidProductIds: diagnostics.invalidProductIds,
     });
 
     // Send handoff message to customer
@@ -268,6 +334,43 @@ export async function processInboundMessage(
   } catch (err) {
     console.error(`${tag} | ERROR |`, err);
   }
+}
+
+/**
+ * Raise a merchant-visible flag when Gemini referenced product_ids that don't
+ * exist in the catalog we sent. Those items were left unmatched by
+ * validateExtraction, so the order needs a human to reconcile line items.
+ * No-op when there are no invalid ids (keeps the 3 call sites clean).
+ */
+async function flagInvalidProducts(
+  supabase: ReturnType<typeof createAdminClient>,
+  params: {
+    merchantId: string;
+    orderId: string;
+    conversationId: string;
+    messageId: string;
+    invalidProductIds: string[];
+  }
+): Promise<void> {
+  const { merchantId, orderId, conversationId, messageId, invalidProductIds } =
+    params;
+  if (invalidProductIds.length === 0) return;
+
+  console.log(
+    `[AI Pipeline] ${messageId.slice(0, 8)} | ${invalidProductIds.length} unknown product(s) referenced → flag`
+  );
+  await supabase.from("flags").insert({
+    merchant_id: merchantId,
+    order_id: orderId,
+    conversation_id: conversationId,
+    message_id: messageId,
+    priority: "medium",
+    category: "ai_low_confidence",
+    title: "AI referenced unknown products — review order items",
+    description: `${invalidProductIds.length} item(s) referenced products not found in the catalog and were left unmatched. Review the order's items against the conversation.`,
+    recommended_action:
+      "Review the order items and match them to catalog products.",
+  });
 }
 
 /**
