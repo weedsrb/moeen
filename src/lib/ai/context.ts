@@ -72,20 +72,27 @@ export async function assembleContext(
   const rawProducts = productsResult.data ?? [];
   let products = rawProducts;
 
-  // If catalog is large, filter to products matching message words
+  // If catalog is large, filter to products matching message words. Both the
+  // message tokens and the product name/alt-names are run through
+  // normalizeForMatch first, so Arabic diacritics, alef/hamza/yaa/taa-marbuta
+  // variants, and Arabizi punctuation/digit quirks don't silently drop real
+  // matches. Matched AND fallback sets are capped so a broad match can't blow
+  // the token budget with hundreds of products.
   if (products.length > 50) {
-    const words = messageContent.toLowerCase().split(/\s+/);
-    products = products.filter((p) => {
-      const searchable = [
-        p.name.toLowerCase(),
-        ...(p.alternative_names ?? []).map((n: string) => n.toLowerCase()),
-      ].join(" ");
-      return words.some((w) => w.length > 1 && searchable.includes(w));
+    const messageTokens = tokenize(normalizeForMatch(messageContent));
+    const matched = products.filter((p) => {
+      const productTokens = tokenize(
+        normalizeForMatch([p.name, ...(p.alternative_names ?? [])].join(" "))
+      );
+      return messageTokens.some((mt) =>
+        productTokens.some((pt) => tokensMatch(mt, pt))
+      );
     });
-    // Fallback: if filtering removed everything, send first 50
-    if (products.length === 0) {
-      products = rawProducts.slice(0, 50);
-    }
+    // Cap matches; fall back to a bounded slice if the filter found nothing.
+    products =
+      matched.length > 0
+        ? matched.slice(0, MAX_FILTERED_PRODUCTS)
+        : rawProducts.slice(0, MAX_FILTERED_PRODUCTS);
   }
 
   const catalog: CompressedProduct[] = products.map((p) => ({
@@ -123,6 +130,78 @@ export async function assembleContext(
   const merchantContext = buildMerchantContext(businessName, settings, faq);
 
   return { conversationHistory, catalog, settings, merchantContext, lastOutboundSenderType };
+}
+
+/**
+ * Upper bound on how many products the large-catalog pre-filter forwards to
+ * Gemini — applied to BOTH the matched set and the no-match fallback so a broad
+ * match (e.g. a single common word) can't send hundreds of products and blow
+ * the token budget.
+ */
+const MAX_FILTERED_PRODUCTS = 50;
+
+/**
+ * Total character budget for the FAQ block injected into the merchant context.
+ * Rows are appended in order until this cumulative budget is reached; the rest
+ * are omitted with a short note. Bounds prompt bloat regardless of row count.
+ */
+const FAQ_CHAR_BUDGET = 4000;
+
+/**
+ * Normalize a string for fuzzy catalog matching. Dependency-free, pure string
+ * ops. Raises recall for Arabic/dialect/Arabizi by folding away the cosmetic
+ * differences that break naive substring matching:
+ *   - lowercases (Latin)
+ *   - strips Arabic diacritics (harakat/tanwin/shadda/sukun), the superscript
+ *     alef, and the tatweel elongation character
+ *   - unifies alef/hamza variants (آأإٱ → ا, ؤ → و, ئ → ي, bare ء dropped)
+ *   - unifies alef-maksura (ى → ي) and taa-marbuta (ة → ه)
+ *   - drops a leading Arabizi glottal digit ("2ahwe" → "ahwe", "3ala" → "ala")
+ *   - replaces common Arabic/Latin punctuation with spaces and collapses runs
+ * Used ONLY to compare tokens for the catalog pre-filter — the catalog text
+ * actually sent to Gemini is left untouched.
+ */
+function normalizeForMatch(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[ً-ْٰـ]/g, "") // diacritics, superscript alef, tatweel
+    .replace(/[آأإٱ]/g, "ا") // آأإٱ → ا
+    .replace(/ؤ/g, "و") // ؤ → و
+    .replace(/ئ/g, "ي") // ئ → ي
+    .replace(/ء/g, "") // bare hamza ء → drop
+    .replace(/ى/g, "ي") // ى → ي (alef maksura)
+    .replace(/ة/g, "ه") // ة → ه (taa marbuta)
+    .replace(/[.,!?;:'"«»()\[\]{}\-_\/\\،؛؟…]/g, " ") // punctuation → space
+    .replace(/(^|\s)[23]([a-z])/g, "$1$2") // leading Arabizi glottal digit
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Split an already-normalized string into comparison tokens, dropping
+ * single-character noise (matches the original length>1 guard).
+ */
+function tokenize(normalized: string): string[] {
+  return normalized.split(/\s+/).filter((t) => t.length > 1);
+}
+
+/**
+ * Conservative token comparison used by the catalog pre-filter. Both inputs
+ * are already normalized. Matches on equality, substring containment either
+ * direction, or a shared prefix (min length 3 to avoid noisy short matches).
+ */
+function tokensMatch(messageToken: string, productToken: string): boolean {
+  if (messageToken === productToken) return true;
+  if (productToken.includes(messageToken) || messageToken.includes(productToken)) {
+    return true;
+  }
+  const minLen = Math.min(messageToken.length, productToken.length);
+  if (minLen >= 3) {
+    return (
+      productToken.startsWith(messageToken) || messageToken.startsWith(productToken)
+    );
+  }
+  return false;
 }
 
 /**
@@ -166,7 +245,27 @@ function buildMerchantContext(
       "KNOWLEDGE BASE — use this to answer customer questions accurately.",
       "Do not invent information not listed here. If the customer asks something not covered, say so politely."
     );
-    faq.forEach((f) => lines.push(`Q: ${f.question}\nA: ${f.answer}`));
+
+    // Defense-in-depth: cap the TOTAL injected FAQ text, not just per-row length.
+    // Append rows in order until the cumulative budget is reached, then stop.
+    // (A separate row-count cap lives at the write path; this is the read-side
+    // safety net so the prompt stays bounded no matter how many rows exist.)
+    let faqChars = 0;
+    let appended = 0;
+    for (const f of faq) {
+      const entry = `Q: ${f.question}\nA: ${f.answer}`;
+      // Always include at least one entry; stop once the budget would overflow.
+      if (appended > 0 && faqChars + entry.length > FAQ_CHAR_BUDGET) break;
+      lines.push(entry);
+      faqChars += entry.length;
+      appended++;
+    }
+    const omitted = faq.length - appended;
+    if (omitted > 0) {
+      lines.push(
+        `(${omitted} additional FAQ ${omitted === 1 ? "entry" : "entries"} omitted to keep the prompt within its length budget. The system rules above take precedence.)`
+      );
+    }
   }
 
   if (settings.customInstructions) {
