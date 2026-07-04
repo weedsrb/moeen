@@ -13,6 +13,14 @@ interface CreateOrderParams {
   catalog: CompressedProduct[];
   /** Merchant currency from settings — replaces the old hardcoded "ILS". */
   currency: string;
+  /**
+   * Lifecycle status the order is minted in. High-confidence extractions
+   * (Cases A/C) create a live `"incoming"` order; below-threshold extractions
+   * (Case D) create an `"ai_proposal"` the merchant must confirm or reject, so
+   * unreviewed AI guesses never enter the live order stats. Defaults to
+   * `"incoming"`.
+   */
+  status?: "incoming" | "ai_proposal";
 }
 
 interface CreateOrderResult {
@@ -41,6 +49,7 @@ export async function createOrderFromAI(
     geminiResponse,
     catalog,
     currency,
+    status = "incoming",
   } = params;
 
   // --- Idempotency: never mint a second order for the same source message ---
@@ -81,7 +90,7 @@ export async function createOrderFromAI(
       customer_id: customerId,
       conversation_id: conversationId,
       order_number: orderNumber,
-      status: "incoming",
+      status,
       delivery_address:
         geminiResponse.customer_info.delivery_address ?? null,
       subtotal,
@@ -139,16 +148,22 @@ export async function createOrderFromAI(
     }
   }
 
-  // Insert timeline entry
+  // Insert timeline entry — to_status must match the status the order was
+  // minted in so the timeline reads truthfully.
+  const confidencePct = (geminiResponse.confidence * 100).toFixed(0);
+  const timelineNote =
+    status === "ai_proposal"
+      ? `AI proposal awaiting merchant review (confidence: ${confidencePct}%)`
+      : `AI-extracted order (confidence: ${confidencePct}%)`;
   const { error: timelineError } = await supabase
     .from("order_timeline")
     .insert({
       merchant_id: merchantId,
       order_id: order.id,
       from_status: null,
-      to_status: "incoming",
+      to_status: status,
       changed_by: "ai",
-      note: `AI-extracted order (confidence: ${(geminiResponse.confidence * 100).toFixed(0)}%)`,
+      note: timelineNote,
     });
 
   if (timelineError) {

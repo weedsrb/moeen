@@ -367,7 +367,10 @@ export async function processInboundMessage(
       return;
     }
 
-    // Case D: Low confidence → create order + flag + send handoff
+    // Case D: Low confidence → create an AI *proposal* (not a live order) +
+    // flag + send handoff. The merchant explicitly confirms (→ incoming) or
+    // rejects (→ cancelled) the proposal, so unreviewed AI guesses never
+    // pollute the live order stats. "AI suggests, the merchant decides."
     const { orderId, orderNumber, diagnostics } = await createOrderFromAI(
       supabase,
       {
@@ -378,6 +381,7 @@ export async function processInboundMessage(
         geminiResponse,
         catalog: context.catalog,
         currency: context.settings.currency,
+        status: "ai_proposal",
       }
     );
 
@@ -388,10 +392,9 @@ export async function processInboundMessage(
       message_id: messageId,
       priority: "medium",
       category: "ai_low_confidence",
-      title: "Low confidence order — needs review",
+      title: "Low confidence — AI proposal awaiting review",
       description: `Confidence: ${(geminiResponse.confidence * 100).toFixed(0)}%. ${geminiResponse.reasoning}`,
-      recommended_action:
-        "Review the AI extraction and confirm or edit the order.",
+      recommended_action: "Review the proposal and confirm or reject it.",
     });
 
     await flagInvalidProducts(supabase, {
@@ -413,7 +416,7 @@ export async function processInboundMessage(
       credentials,
       settings.handoffMessage
     );
-    console.log(`${tag} | action | Case D → order ${orderNumber} + flag + handoff sent`);
+    console.log(`${tag} | action | Case D → AI proposal ${orderNumber} + flag + handoff sent`);
   } catch (err) {
     console.error(`${tag} | ERROR |`, err);
   }

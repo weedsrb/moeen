@@ -1,4 +1,5 @@
 export type OrderStatus =
+  | "ai_proposal"
   | "incoming"
   | "pending"
   | "confirmed"
@@ -75,6 +76,7 @@ export interface OrderBoardColumn {
 }
 
 export const ORDER_BOARD_STATUSES: OrderStatus[] = [
+  "ai_proposal",
   "incoming",
   "pending",
   "confirmed",
@@ -83,6 +85,7 @@ export const ORDER_BOARD_STATUSES: OrderStatus[] = [
 ];
 
 export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
+  ai_proposal: "AI Proposal",
   incoming: "Incoming",
   pending: "Pending",
   confirmed: "Confirmed",
@@ -92,6 +95,10 @@ export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
 };
 
 export const ORDER_ALLOWED_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
+  // Proposals are only ever created by the AI pipeline. The merchant either
+  // confirms (-> incoming, joining the live pipeline) or rejects
+  // (-> cancelled). No status transitions INTO ai_proposal.
+  ai_proposal: ["incoming", "cancelled"],
   incoming: ["pending", "confirmed", "cancelled"],
   pending: ["confirmed", "cancelled", "incoming"],
   confirmed: ["out_for_delivery", "cancelled"],

@@ -6,6 +6,10 @@ export function formatOrderNumber(n: string): string {
 
 export function statusColorClass(s: OrderStatus): string {
   switch (s) {
+    case "ai_proposal":
+      // Violet (`--color-ai`) is reserved exclusively for AI-generated
+      // content — an AI proposal is exactly that.
+      return "text-ai border-ai bg-ai/10";
     case "incoming":
       return "text-status-incoming border-status-incoming bg-status-incoming/10";
     case "pending":
