@@ -16,6 +16,25 @@ import type { ValidationDiagnostics } from "./validate-extraction";
  */
 const DEBOUNCE_MS = 8_000;
 
+/**
+ * AI circuit-breaker tuning. When a merchant's Gemini calls fail repeatedly we
+ * stop calling Gemini for a cooldown, fast-failing inbound order signals to
+ * `ai_unavailable` flags instead of hammering a failing API. Persisted state
+ * lives in merchant_settings.ai_status / ai_paused_at (migration 018).
+ *
+ *   - AI_FAILURE_WINDOW_MS   — how far back we count `ai_unavailable` failures.
+ *   - AI_FAILURE_THRESHOLD   — failures inside that window that TRIP the breaker.
+ *   - AI_PAUSE_COOLDOWN_MS   — how long it stays paused before a half-open probe.
+ *
+ * State machine: active → (>=THRESHOLD failures in WINDOW) → paused →
+ * (fast-fail during COOLDOWN) → (COOLDOWN elapsed) → half-open probe →
+ * success ? active : re-trip. It can never get permanently stuck because the
+ * cooldown always eventually lets exactly one probe through.
+ */
+const AI_FAILURE_WINDOW_MS = 5 * 60_000;
+const AI_PAUSE_COOLDOWN_MS = 10 * 60_000;
+const AI_FAILURE_THRESHOLD = 3;
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -177,6 +196,50 @@ export async function processInboundMessage(
     // (e.g. re-scored after a prompt bump) stay comparable.
     const inputHash = createHash("sha256").update(effectiveContent).digest("hex");
 
+    // --- Step 2c: Circuit breaker gate ---
+    // We're now about to spend a Gemini call. If the breaker is tripped and
+    // still cooling down, fast-fail to an ai_unavailable flag WITHOUT calling
+    // Gemini. If the cooldown has elapsed, fall through as a single half-open
+    // probe (a success later resets the breaker). Read once here and reuse the
+    // in-memory value at the success point to avoid an extra query.
+    const breakerState = await readBreakerState(supabase, merchantId);
+    const breakerWasPaused = breakerState.status === "paused";
+
+    if (breakerWasPaused && breakerState.pausedAt) {
+      const cooldownRemaining =
+        AI_PAUSE_COOLDOWN_MS -
+        (Date.now() - new Date(breakerState.pausedAt).getTime());
+      if (cooldownRemaining > 0) {
+        console.log(`${tag} | breaker | paused (cooldown) → fast-fail`);
+        await supabase.from("flags").insert({
+          merchant_id: merchantId,
+          conversation_id: conversationId,
+          message_id: messageId,
+          priority: "critical",
+          category: "ai_unavailable",
+          title: "AI paused — message not processed",
+          description:
+            "The AI pipeline is temporarily paused after repeated Gemini failures, so this message was not processed automatically. It resumes on its own after a short cooldown.",
+          recommended_action:
+            "Review the message manually. AI processing resumes automatically once the cooldown elapses.",
+        });
+        await supabase
+          .from("messages")
+          .update({ ai_processed: true })
+          .in("id", burstIds);
+        await recordDecision(supabase, {
+          merchantId,
+          conversationId,
+          messageId,
+          inputHash,
+          decisionCase: "ai_unavailable",
+          geminiConfidence: null,
+        });
+        return;
+      }
+      console.log(`${tag} | breaker | cooldown elapsed → half-open probe`);
+    }
+
     // --- Step 3: Call Gemini (with 1 retry) ---
     let geminiResponse: GeminiResponse;
     try {
@@ -230,8 +293,20 @@ export async function processInboundMessage(
           decisionCase: "ai_unavailable",
           geminiConfidence: null,
         });
+        // Breaker: this failure may be the one that trips the merchant into a
+        // cooldown. Counts recent ai_unavailable flags (including the one just
+        // inserted) and pauses if the threshold is met. Never throws.
+        await maybeTripBreaker(supabase, merchantId, tag);
         return;
       }
+    }
+
+    // Gemini SUCCESS. If this run was a half-open probe (breaker was paused on
+    // entry), the probe passed → reset the breaker to active. Guarded by the
+    // in-memory flag so healthy merchants never issue this write.
+    if (breakerWasPaused) {
+      console.log(`${tag} | breaker | half-open probe succeeded → reset active`);
+      await resetBreaker(supabase, merchantId);
     }
 
     // --- Step 4: Save AI result to message ---
@@ -346,6 +421,14 @@ export async function processInboundMessage(
         messageId,
         invalidProductIds: diagnostics.invalidProductIds,
       });
+      await flagStockAndVariantIssues(supabase, {
+        merchantId,
+        orderId,
+        conversationId,
+        messageId,
+        outOfStockItems: diagnostics.outOfStockItems ?? [],
+        invalidVariants: diagnostics.invalidVariants ?? [],
+      });
       await recordDecision(supabase, {
         merchantId,
         conversationId,
@@ -420,6 +503,14 @@ export async function processInboundMessage(
         messageId,
         invalidProductIds: diagnostics.invalidProductIds,
       });
+      await flagStockAndVariantIssues(supabase, {
+        merchantId,
+        orderId,
+        conversationId,
+        messageId,
+        outOfStockItems: diagnostics.outOfStockItems ?? [],
+        invalidVariants: diagnostics.invalidVariants ?? [],
+      });
       await recordDecision(supabase, {
         merchantId,
         conversationId,
@@ -470,6 +561,15 @@ export async function processInboundMessage(
       conversationId,
       messageId,
       invalidProductIds: diagnostics.invalidProductIds,
+    });
+
+    await flagStockAndVariantIssues(supabase, {
+      merchantId,
+      orderId,
+      conversationId,
+      messageId,
+      outOfStockItems: diagnostics.outOfStockItems ?? [],
+      invalidVariants: diagnostics.invalidVariants ?? [],
     });
 
     // Send handoff message to customer
@@ -593,6 +693,169 @@ async function flagInvalidProducts(
     recommended_action:
       "Review the order items and match them to catalog products.",
   });
+}
+
+/**
+ * Raise ONE merchant-visible flag when deterministic validation found stock
+ * shortfalls and/or unrecognized variants on an order's items. Non-blocking:
+ * the order is already created ("AI suggests, the merchant decides") — this
+ * just surfaces what needs reconciling.
+ *
+ *   - Stock shortfalls present → category `out_of_stock`, priority `medium`.
+ *   - Variant-only issues      → category `ai_low_confidence`, priority `low`.
+ *
+ * No-op when both arrays are empty (keeps the 3 order-creating call sites clean,
+ * mirroring flagInvalidProducts).
+ */
+async function flagStockAndVariantIssues(
+  supabase: ReturnType<typeof createAdminClient>,
+  params: {
+    merchantId: string;
+    orderId: string;
+    conversationId: string;
+    messageId: string;
+    outOfStockItems: string[];
+    invalidVariants: string[];
+  }
+): Promise<void> {
+  const {
+    merchantId,
+    orderId,
+    conversationId,
+    messageId,
+    outOfStockItems,
+    invalidVariants,
+  } = params;
+  if (outOfStockItems.length === 0 && invalidVariants.length === 0) return;
+
+  const hasStockIssue = outOfStockItems.length > 0;
+  const parts: string[] = [];
+  if (outOfStockItems.length > 0) {
+    parts.push(`Insufficient stock — ${outOfStockItems.join("; ")}`);
+  }
+  if (invalidVariants.length > 0) {
+    parts.push(`Unrecognized variant(s) — ${invalidVariants.join("; ")}`);
+  }
+
+  console.log(
+    `[AI Pipeline] ${messageId.slice(0, 8)} | stock/variant issues (${outOfStockItems.length} stock, ${invalidVariants.length} variant) → flag`
+  );
+  await supabase.from("flags").insert({
+    merchant_id: merchantId,
+    order_id: orderId,
+    conversation_id: conversationId,
+    message_id: messageId,
+    priority: hasStockIssue ? "medium" : "low",
+    category: hasStockIssue ? "out_of_stock" : "ai_low_confidence",
+    title: hasStockIssue
+      ? "Order exceeds available stock"
+      : "AI matched an unavailable variant",
+    description: parts.join(". "),
+    recommended_action:
+      "Review the order items against current stock and offered variants before confirming with the customer.",
+  });
+}
+
+// --- Circuit breaker helpers ---
+// All wrapped so a breaker failure only logs and never throws into the pipeline,
+// consistent with the fire-and-forget audit pattern (recordDecision).
+
+interface BreakerState {
+  status: "active" | "paused";
+  pausedAt: string | null;
+}
+
+/**
+ * Read the merchant's breaker state (ai_status / ai_paused_at). Never throws —
+ * on any error it returns `active`, so a read failure fails OPEN (Gemini still
+ * runs) rather than wedging the merchant.
+ */
+async function readBreakerState(
+  supabase: ReturnType<typeof createAdminClient>,
+  merchantId: string
+): Promise<BreakerState> {
+  try {
+    const { data, error } = await supabase
+      .from("merchant_settings")
+      .select("ai_status, ai_paused_at")
+      .eq("merchant_id", merchantId)
+      .maybeSingle();
+    if (error) {
+      console.error(`[AI Pipeline] breaker | read failed: ${error.message}`);
+      return { status: "active", pausedAt: null };
+    }
+    return {
+      status: data?.ai_status === "paused" ? "paused" : "active",
+      pausedAt: data?.ai_paused_at ?? null,
+    };
+  } catch (err) {
+    console.error(`[AI Pipeline] breaker | read error:`, err);
+    return { status: "active", pausedAt: null };
+  }
+}
+
+/**
+ * After an ai_unavailable failure, count recent ai_unavailable flags for this
+ * merchant within AI_FAILURE_WINDOW_MS and TRIP the breaker (ai_status=paused,
+ * ai_paused_at=now) if the threshold is met. Never throws.
+ */
+async function maybeTripBreaker(
+  supabase: ReturnType<typeof createAdminClient>,
+  merchantId: string,
+  tag: string
+): Promise<void> {
+  try {
+    const windowStart = new Date(Date.now() - AI_FAILURE_WINDOW_MS).toISOString();
+    const { count, error } = await supabase
+      .from("flags")
+      .select("id", { count: "exact", head: true })
+      .eq("merchant_id", merchantId)
+      .eq("category", "ai_unavailable")
+      .gte("created_at", windowStart);
+    if (error) {
+      console.error(
+        `[AI Pipeline] breaker | failure count failed: ${error.message}`
+      );
+      return;
+    }
+    if ((count ?? 0) >= AI_FAILURE_THRESHOLD) {
+      const { error: updateError } = await supabase
+        .from("merchant_settings")
+        .update({ ai_status: "paused", ai_paused_at: new Date().toISOString() })
+        .eq("merchant_id", merchantId);
+      if (updateError) {
+        console.error(
+          `[AI Pipeline] breaker | trip update failed: ${updateError.message}`
+        );
+        return;
+      }
+      console.log(
+        `${tag} | breaker | TRIPPED — ${count} ai_unavailable failure(s) in window → paused`
+      );
+    }
+  } catch (err) {
+    console.error(`[AI Pipeline] breaker | trip error:`, err);
+  }
+}
+
+/**
+ * Reset the breaker to active after a successful half-open probe. Never throws.
+ */
+async function resetBreaker(
+  supabase: ReturnType<typeof createAdminClient>,
+  merchantId: string
+): Promise<void> {
+  try {
+    const { error } = await supabase
+      .from("merchant_settings")
+      .update({ ai_status: "active", ai_paused_at: null })
+      .eq("merchant_id", merchantId);
+    if (error) {
+      console.error(`[AI Pipeline] breaker | reset failed: ${error.message}`);
+    }
+  } catch (err) {
+    console.error(`[AI Pipeline] breaker | reset error:`, err);
+  }
 }
 
 /**

@@ -21,6 +21,49 @@ export interface ValidationDiagnostics {
   invalidProductIds: string[];
   /** Number of items whose price/subtotal we recomputed from the catalog. */
   priceCorrections: number;
+  /**
+   * Matched items whose requested quantity exceeds the catalog stock, formatted
+   * `"<product_name> (need <qty>, have <stock>)"`. NOT blocking — surfaced as a
+   * merchant flag ("AI suggests, the merchant decides"). Optional so callers
+   * that build a diagnostics literal without it (e.g. the order-creator
+   * idempotency short-circuit) still type-check; validateExtraction always
+   * populates it (default empty).
+   */
+  outOfStockItems?: string[];
+  /**
+   * Matched items whose Gemini-returned `variant` is not among the product's
+   * offered variant options, formatted `"<product_name>: <variant>"`. Lenient:
+   * products that define no variants at all are never flagged. Optional for the
+   * same reason as `outOfStockItems`; validateExtraction always populates it.
+   */
+  invalidVariants?: string[];
+}
+
+/**
+ * Flatten a CompressedProduct's variant strings into a case-insensitive set of
+ * acceptable tokens. `variants` entries look like `"Size: S, M, L"` — both the
+ * group NAME ("size") and every OPTION ("s", "m", "l") count as a valid match,
+ * so a customer saying either "large" or "size" reconciles. Tokens are split on
+ * ':' then ',' and lower-cased. Returns an empty set when no variants exist.
+ */
+function collectVariantTokens(variants: string[]): Set<string> {
+  const tokens = new Set<string>();
+  for (const entry of variants) {
+    // Split "Name: opt1, opt2" into the name and the options blob, then the
+    // options on commas. Missing colon → treat the whole entry as options.
+    const colonIdx = entry.indexOf(":");
+    const namePart = colonIdx >= 0 ? entry.slice(0, colonIdx) : "";
+    const optionsPart = colonIdx >= 0 ? entry.slice(colonIdx + 1) : entry;
+
+    const name = namePart.trim();
+    if (name) tokens.add(name.toLowerCase());
+
+    for (const opt of optionsPart.split(",")) {
+      const trimmed = opt.trim();
+      if (trimmed) tokens.add(trimmed.toLowerCase());
+    }
+  }
+  return tokens;
 }
 
 export interface ValidationResult {
@@ -48,6 +91,8 @@ export function validateExtraction(
 ): ValidationResult {
   const catalogById = new Map(catalog.map((p) => [p.id, p]));
   const invalidProductIds: string[] = [];
+  const outOfStockItems: string[] = [];
+  const invalidVariants: string[] = [];
   let priceCorrections = 0;
 
   const items: ValidatedItem[] = geminiResponse.items.map((item) => {
@@ -74,6 +119,25 @@ export function validateExtraction(
         }
         unitPrice = recomputedUnit;
         subtotal = recomputedSubtotal;
+
+        // Rule 4 (advisory, non-blocking): stock sufficiency. If the customer
+        // asked for more than we have on hand, record it so the merchant can
+        // reconcile before confirming — we do NOT refuse to create the order.
+        if (product.stock < item.quantity) {
+          outOfStockItems.push(
+            `${product.name} (need ${item.quantity}, have ${product.stock})`
+          );
+        }
+
+        // Rule 5 (advisory, non-blocking): variant sanity. Only check when the
+        // extraction specified a variant AND the product actually offers
+        // variants (products that don't track variants are never flagged).
+        if (item.variant !== null && product.variants.length > 0) {
+          const offered = collectVariantTokens(product.variants);
+          if (!offered.has(item.variant.trim().toLowerCase())) {
+            invalidVariants.push(`${product.name}: ${item.variant}`);
+          }
+        }
       }
     }
 
@@ -96,6 +160,11 @@ export function validateExtraction(
     items,
     subtotal,
     total,
-    diagnostics: { invalidProductIds, priceCorrections },
+    diagnostics: {
+      invalidProductIds,
+      priceCorrections,
+      outOfStockItems,
+      invalidVariants,
+    },
   };
 }
