@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { createFAQSchema } from "@/lib/validations/ai-settings";
+import { createFAQSchema, MAX_FAQ_ENTRIES } from "@/lib/validations/ai-settings";
 import { requireMerchantForApi } from "@/lib/auth/require-merchant";
 
 export async function GET() {
@@ -32,6 +32,24 @@ export async function POST(request: NextRequest) {
   if (!parsed.success) {
     return NextResponse.json(
       { error: parsed.error.issues[0].message },
+      { status: 400 }
+    );
+  }
+
+  const { count, error: countError } = await supabase
+    .from("merchant_faq")
+    .select("id", { count: "exact", head: true })
+    .eq("merchant_id", auth.merchant.id);
+
+  if (countError) {
+    return NextResponse.json({ error: countError.message }, { status: 500 });
+  }
+
+  if ((count ?? 0) >= MAX_FAQ_ENTRIES) {
+    return NextResponse.json(
+      {
+        error: `FAQ limit reached (max ${MAX_FAQ_ENTRIES} entries). Delete an entry before adding more.`,
+      },
       { status: 400 }
     );
   }
