@@ -32,13 +32,20 @@
 > ⚠️ **NOT THE CURRENT IMPLEMENTATION.** This n8n flow was never built. The live
 > incoming-message pipeline runs **in-process inside Next.js** —
 > `processInboundMessage` (`src/lib/ai/process.ts`), scheduled on an `after()`
-> callback from `/api/webhooks/instagram`. The real pipeline also does things
-> this sketch predates: an **8s burst debounce** (last-message-wins), a
-> **deterministic validation** pass over Gemini's output, an **`ai_proposal`**
-> draft state for below-threshold orders, an **`ai_decisions`** audit row per
-> Gemini call, and content-window order dedup. `07_AI_PIPELINE.md` is
-> authoritative. The section below is retained only as an **optional /
-> aspirational** design for orchestrating the same steps externally in n8n.
+> callback from `/api/webhooks/instagram`. The real pipeline is a
+> **conversational order-taking agent**, not the single-shot extraction this
+> sketch describes: an **8s burst debounce** (last-message-wins), a **cheap LLM
+> intent classifier** cold-gate (RegEx kept only as a fail-open fallback), a
+> **circuit breaker**, a **deterministic stage-gating validation** pass over
+> Gemini's output, a **`collecting`** draft order the AI gathers details into
+> across turns (promoted to `incoming` only after the customer confirms a
+> readback **and** the order is deterministically finalizable), an
+> **`ai_decisions`** audit row per Gemini call, and content-window order dedup.
+> `07_AI_PIPELINE.md` is authoritative. The section below is retained only as
+> an **optional / aspirational** design for orchestrating the same steps
+> externally in n8n, and its decision tree reflects an **older, superseded**
+> confidence-threshold design — see `07_AI_PIPELINE.md`'s Stage 6 for the real
+> decision tree.
 
 **This is Mo'een's heartbeat.** Every customer message flows through this pipeline.
 
@@ -71,111 +78,101 @@ Save Message
     │ Set direction='inbound', sender_type='customer'
     │
     ▼
-RegEx Pre-Filter
-    │ Run pattern matching against message text
-    │ Patterns (Arabic + English + Arabizi):
-    │   - "بدي", "اريد", "عايز" (I want)
-    │   - "اطلب", "طلب" (order)
-    │   - Number + product-like word
-    │   - "كم سعر", "كم حق" (how much)
-    │   - "order", "want", "need", "buy"
-    │   - "2 knafeh", "3 pieces" (number + noun)
-    │   - Delivery keywords: "توصيل", "deliver", "عنوان"
+Cold-Start Gate
+    │ (actual pipeline: cheap LLM intent classifier, RegEx is a fallback only)
+    │ Mid-conversation signal? (open collecting draft / reply-to-AI / bare number)
+    │   → ALWAYS process, skip straight to Build Gemini Context
+    │ Otherwise classify: order / question / other
     │
-    ├── No order signal detected
+    ├── Classified "other"
     │   └── STOP. Message is saved. No AI call. Dashboard shows it in conversation.
     │
-    └── Order signal detected
+    └── Classified "order" or "question" (or an always-process signal fired)
         │ Update message: has_order_signal = true
         │
         ▼
     Build Gemini Context
         │ Fetch: last 6 messages from this conversation
         │ Fetch: merchant's product catalog (compressed format)
-        │ Fetch: merchant's AI settings (confidence threshold, handoff message)
+        │ Fetch: merchant's AI settings (persona, tone, language, handoff message)
+        │ Fetch: the open `collecting` order for this conversation, rendered
+        │        as "order so far" — this is how the agent remembers the
+        │        in-progress order across turns
         │
         ▼
-    Call Gemini 2.5 Flash
-        │ (See AI_PIPELINE.md for prompt template and response format)
+    Call Gemini 2.5 Flash — the order-taking agent
+        │ (See 07_AI_PIPELINE.md for the prompt and response schema)
+        │ Returns: intent, order_stage, items[], missing_fields[],
+        │          reply_to_customer, needs_human, confidence
         │
         ├── Gemini succeeds
         │   │ Update message: ai_processed = true, ai_result = response JSON
         │   │
         │   ▼
-        │   Process Gemini Response
+        │   Deterministic Validation (stage-gating, NOT just advisory)
+        │   │ Allow-list product_ids · recompute prices/totals from catalog ·
+        │   │ check stock ≤ available · check variant is offered
+        │   │ Any hard problem forces order_stage back DOWN to "collecting"
         │   │
-        │   ├── intent = "order" AND confidence >= threshold
-        │   │   │
-        │   │   ▼
-        │   │   Create Order
-        │   │   │ INSERT order (status: 'incoming', ai_extracted: true, ai_confidence: X)
-        │   │   │ INSERT order_items (matched products, quantities, prices)
-        │   │   │ INSERT order_timeline entry
-        │   │   └── Done. Dashboard updates via Supabase Realtime.
+        │   ▼
+        │   Resolve Stage & Act
         │   │
-        │   ├── intent = "order" AND confidence < threshold   (actual pipeline = Case D)
-        │   │   │
-        │   │   ▼
-        │   │   Create AI Proposal + Flag + Handoff
-        │   │   │ INSERT order (status: 'ai_proposal' — NOT a live order)
-        │   │   │ INSERT flag (priority: 'medium', category: 'ai_low_confidence')
-        │   │   │ Send handoff message to customer
-        │   │   └── Merchant confirms (-> incoming) or rejects (-> cancelled).
+        │   ├── order_stage = "cancelled"
+        │   │   │ Cancel the open collecting order (if any); send the reply
+        │   │   └── decision_case: order_cancelled_by_customer
         │   │
-        │   ├── intent = "order" AND missing_fields present AND confidence >= threshold
-        │   │   │
-        │   │   ▼
-        │   │   Send Clarifying Question
-        │   │   │ Gemini provides a natural clarifying question
-        │   │   │ Send via the channel provider — Instagram (outbound message, sender_type: 'ai')
-        │   │   │ Save outbound message in messages table
-        │   │   └── Wait for customer reply (next webhook trigger restarts flow)
+        │   ├── order_stage = "collecting" / "ready_to_confirm" (not finalizable)
+        │   │   │ Upsert the ONE open collecting draft for this conversation
+        │   │   │ (create if none exists yet, else overwrite items/address)
+        │   │   │ Flag invalid products / stock shortfalls / invalid variants
+        │   │   │ Send exactly one reply: next question, availability notice,
+        │   │   │ or the readback ("To confirm: … shall I place it?")
+        │   │   └── decision_case: order_collecting / order_ready_to_confirm
         │   │
-        │   ├── intent = "order" AND missing_fields present AND confidence < threshold
-        │   │   │
-        │   │   ▼
-        │   │   Flag for Human
-        │   │   │ INSERT flag (priority: 'medium', category: 'ai_low_confidence')
-        │   │   │ Send handoff message to customer via the channel provider (Instagram)
-        │   │   │ "A team member will assist you shortly."
-        │   │   └── Merchant handles manually.
+        │   ├── order_stage = "confirmed" AND deterministically finalizable
+        │   │   │ FINALIZE GATE PASSES — promote collecting -> incoming
+        │   │   │ INSERT order_timeline entry (changed_by: 'ai')
+        │   │   │ Send acknowledgement to the customer
+        │   │   └── decision_case: order_confirmed. Dashboard updates via Realtime.
         │   │
-        │   ├── intent = "question" (customer asking about price, availability, etc.)
-        │   │   │
-        │   │   ▼
-        │   │   Answer or Flag   (actual pipeline)
-        │   │   │ If Gemini returned an "answer" → send it (sender_type: 'ai') — question_answered
-        │   │   │ Else INSERT flag (priority: 'low', category: 'customer_waiting') — question_flagged
-        │   │   └── No order created.
+        │   ├── intent = "question"
+        │   │   │ If Gemini returned reply_to_customer → send it (sender_type: 'ai')
+        │   │   │ Else INSERT flag (priority: 'low', category: 'customer_waiting')
+        │   │   └── decision_case: question_answered / question_flagged. No order created.
         │   │
-        │   └── intent = "other" (greeting, thanks, general chat)
-        │       └── No action. Message is saved in conversation. No flag, no order.
+        │   ├── intent = "other" (greeting, thanks, general chat)
+        │   │   └── No action. decision_case: intent_other.
+        │   │
+        │   └── needs_human = true  (genuine escalation ONLY — not low confidence)
+        │       │ Send handoff message: "A team member will assist you shortly."
+        │       │ INSERT flag (priority: 'medium'/'critical', category: 'human_requested')
+        │       └── Merchant handles manually.
         │
         └── Gemini fails (timeout, error, rate limit)
             │
             ▼
-            Retry once (5 second delay)
+            Retry once (immediate, no delay)
             │
             ├── Retry succeeds → continue normal flow above
             │
             └── Retry fails
-                │ INSERT flag (priority: 'medium', category: 'ai_unavailable')
-                │ Flag title: "AI processing unavailable — manual review needed"
+                │ INSERT flag (priority: 'critical', category: 'ai_unavailable')
                 │ Flag links to the specific message
                 │
-                │ If 3+ failures in last 5 minutes:   (PLANNED — see notes below)
-                │   Update merchant_settings: ai_status = 'paused'
-                │   (Frontend shows banner: "AI processing is temporarily paused")
+                │ If 3+ failures in last 5 minutes:   (BUILT — see notes below)
+                │   Update merchant_settings: ai_status = 'paused', ai_paused_at = now()
+                │   (Frontend banner still planned)
                 │
-                └── When Gemini recovers (next successful call):
-                    Update merchant_settings: ai_status = 'active'
+                └── When the cooldown elapses, one half-open probe is allowed;
+                    any success resets merchant_settings.ai_status = 'active'
 ```
 
 **Important notes:**
-- The RegEx pre-filter is intentionally generous — it's better to send a non-order to Gemini (wasted API call) than to miss a real order
-- Clarifying questions are sent automatically only if `ai_auto_clarify` is enabled in merchant settings
-- The merchant can disable auto-clarify, in which case all uncertain messages become flags
-- **The actual pipeline (`process.ts`) differs from this sketch** and is authoritative (`07_AI_PIPELINE.md`): it debounces bursts (8s, last-message-wins), validates Gemini's output deterministically before any order is written, parks below-threshold orders as `ai_proposal` drafts (not live orders), dedups orders per source message, and writes one `ai_decisions` audit row per Gemini call.
+- The classifier's cold-gate is deliberately biased toward recall — it's better to send a non-order to the full agent (wasted API call) than to miss a real order. A classifier outage fails open to the old RegEx filter rather than dropping the message.
+- There is no more "auto-clarify on/off" branch point — the agent always keeps gathering details by asking; the only thing `ai_auto_clarify` no longer controls in the new design is whether uncertain orders get created live (they never do now — see below).
+- **The actual pipeline (`process.ts`) differs from this sketch** and is authoritative (`07_AI_PIPELINE.md`): it debounces bursts (8s, last-message-wins), runs a cheap LLM classifier cold-gate (not RegEx), maintains one `collecting` draft order per conversation that the agent gathers details into across turns, validates Gemini's output deterministically as a **stage gate** (not just a flag), only promotes to a live `incoming` order after the customer confirms a readback **and** the deterministic validator agrees the order is finalizable, sends the handoff message only on genuine escalation (`needs_human`) rather than on low confidence, dedups orders per source message, and writes one `ai_decisions` audit row per Gemini call.
+- **Confidence no longer gates order creation.** The old design compared `confidence >= threshold` to decide whether to auto-create, clarify, or propose. The new design gates on deterministic finalizability + explicit customer confirmation instead; `ai_confidence_threshold` is currently vestigial for this purpose (still recorded, still passed to Gemini, not used to branch). See `07_AI_PIPELINE.md`.
+- **The below-threshold `ai_proposal` status is dormant, not removed.** The AI pipeline no longer creates `ai_proposal` orders (the `collecting` status supersedes that flow); the status, UI, and quota/dashboard treatment remain for historical rows and as a safety net.
 - **The `ai_status` circuit breaker is built** (migration 018 + `process.ts`): 3 `ai_unavailable` failures in 5 min trips it, fast-failing order signals for a 10-min cooldown before a half-open probe; any Gemini success resets it. Only the merchant-facing "AI paused" banner UI remains planned.
 
 ---
