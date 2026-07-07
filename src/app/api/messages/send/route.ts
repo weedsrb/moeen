@@ -51,57 +51,121 @@ export async function POST(request: NextRequest) {
   }
 
   const provider = getProvider(conversation.platform, credentials);
+  const chatId = conversation.platform_chat_id;
 
-  // Send normally first (works within the 24h standard window). The
-  // HUMAN_AGENT tag extends merchant (human) replies to a 7-day window, but
-  // it's a separately Meta-reviewed feature — only attempt it as a fallback
-  // once we know the standard window has actually expired. AI sends never
-  // use this tag.
-  let result = await provider.sendMessage(
-    conversation.platform_chat_id,
-    parsed.data.content
-  );
+  // Resolve the replied-to message's platform mid so the provider can thread it.
+  let replyToMid: string | undefined;
+  if (parsed.data.replyToMessageId) {
+    const { data: parent } = await supabase
+      .from("messages")
+      .select("platform_message_id")
+      .eq("id", parsed.data.replyToMessageId)
+      .eq("conversation_id", conversation.id)
+      .maybeSingle();
+    replyToMid = parent?.platform_message_id ?? undefined;
+  }
 
-  if (
-    !result.success &&
-    isWindowExpiredError(result.error) &&
-    provider instanceof InstagramProvider
+  // Send normally first (works within the 24h standard window). The HUMAN_AGENT
+  // tag extends merchant (human) replies to a 7-day window, but it's a
+  // separately Meta-reviewed feature — only attempt it as a fallback once we
+  // know the standard window has actually expired.
+  async function sendWithWindowRetry(
+    text: string,
+    opts: { imageUrl?: string; replyToMid?: string }
   ) {
-    result = await provider.sendMessage(
-      conversation.platform_chat_id,
-      parsed.data.content,
-      { humanAgentTag: true }
-    );
+    let result = await provider.sendMessage(chatId, text, opts);
+    if (
+      !result.success &&
+      isWindowExpiredError(result.error) &&
+      provider instanceof InstagramProvider
+    ) {
+      result = await provider.sendMessage(chatId, text, {
+        ...opts,
+        humanAgentTag: true,
+      });
+    }
+    return result;
   }
 
-  if (!result.success) {
-    return NextResponse.json(
-      { error: result.error ?? "Failed to send message" },
-      { status: 500 }
-    );
+  const content = parsed.data.content?.trim();
+  const mediaUrl = parsed.data.mediaUrl;
+  const replyToMessageId = parsed.data.replyToMessageId ?? null;
+
+  type InsertedMessage = { id: string } & Record<string, unknown>;
+  const inserted: InsertedMessage[] = [];
+
+  // Instagram can't combine text + attachment in one send. If both are present,
+  // send the image first (it carries the reply-thread), then the caption text.
+  if (mediaUrl) {
+    const result = await sendWithWindowRetry("", { imageUrl: mediaUrl, replyToMid });
+    if (!result.success) {
+      return NextResponse.json(
+        { error: result.error ?? "Failed to send image" },
+        { status: 500 }
+      );
+    }
+
+    const { data: message, error: msgError } = await supabase
+      .from("messages")
+      .insert({
+        merchant_id: merchant.id,
+        conversation_id: conversation.id,
+        platform_message_id: result.messageId ?? null,
+        direction: "outbound",
+        sender_type: "merchant",
+        content: "",
+        message_type: "image",
+        media_url: mediaUrl,
+        reply_to_message_id: replyToMessageId,
+        has_order_signal: false,
+        ai_processed: false,
+      })
+      .select()
+      .single();
+
+    if (msgError) {
+      return NextResponse.json({ error: msgError.message }, { status: 500 });
+    }
+    inserted.push(message as InsertedMessage);
   }
 
-  const { data: message, error: msgError } = await supabase
-    .from("messages")
-    .insert({
-      merchant_id: merchant.id,
-      conversation_id: conversation.id,
-      platform_message_id: result.messageId ?? null,
-      direction: "outbound",
-      sender_type: "merchant",
-      content: parsed.data.content,
-      message_type: "text",
-      has_order_signal: false,
-      ai_processed: false,
-    })
-    .select()
-    .single();
+  if (content) {
+    // When an image already carried the reply thread, the caption follows up
+    // unthreaded.
+    const result = await sendWithWindowRetry(content, {
+      replyToMid: mediaUrl ? undefined : replyToMid,
+    });
+    if (!result.success) {
+      return NextResponse.json(
+        { error: result.error ?? "Failed to send message" },
+        { status: 500 }
+      );
+    }
 
-  if (msgError) {
-    return NextResponse.json({ error: msgError.message }, { status: 500 });
+    const { data: message, error: msgError } = await supabase
+      .from("messages")
+      .insert({
+        merchant_id: merchant.id,
+        conversation_id: conversation.id,
+        platform_message_id: result.messageId ?? null,
+        direction: "outbound",
+        sender_type: "merchant",
+        content,
+        message_type: "text",
+        reply_to_message_id: mediaUrl ? null : replyToMessageId,
+        has_order_signal: false,
+        ai_processed: false,
+      })
+      .select()
+      .single();
+
+    if (msgError) {
+      return NextResponse.json({ error: msgError.message }, { status: 500 });
+    }
+    inserted.push(message as InsertedMessage);
   }
 
-  const preview = parsed.data.content.substring(0, 100);
+  const preview = (content || "[image]").substring(0, 100);
   await supabase
     .from("conversations")
     .update({
@@ -110,5 +174,9 @@ export async function POST(request: NextRequest) {
     })
     .eq("id", conversation.id);
 
-  return NextResponse.json({ success: true, message });
+  return NextResponse.json({
+    success: true,
+    message: inserted[inserted.length - 1] ?? null,
+    messages: inserted,
+  });
 }
