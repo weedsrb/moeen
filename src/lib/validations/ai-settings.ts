@@ -14,6 +14,11 @@ export const updateAISettingsSchema = z.object({
   ai_acknowledge_template: z.string().max(500).nullable().optional(),
 });
 
+// Cap on the number of FAQ rows a merchant can create. Each row is injected
+// verbatim into the Gemini system prompt, so an unbounded row count would bloat
+// the prompt. Length per row is already capped by createFAQSchema.
+export const MAX_FAQ_ENTRIES = 50;
+
 export const createFAQSchema = z.object({
   question: z.string().min(1).max(300),
   answer: z.string().min(1).max(1000),

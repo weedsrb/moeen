@@ -158,6 +158,8 @@ Core tables: `merchant_faq` (AI knowledge base Q&A pairs per merchant)
 | 2 — Catalog & Inventory | ✅ Complete | Product CRUD, image upload, inventory page, stock adjustments, dashboard alerts |
 | 3 — WhatsApp Integration | ✅ Complete | WhatsApp Cloud API connection, webhook receiver, real-time conversations, send/receive messages, unread badges |
 | 4 — AI Pipeline | ✅ Complete | Gemini 2.5 Flash, regex pre-filter, order extraction, confidence-based decisions, AI settings UI, FAQ knowledge base |
+| 4.5 — AI Pipeline Hardening | ✅ Code complete | Deterministic validation layer, prompt sandboxing, 8s burst debounce, `ai_proposal` draft state, `ai_decisions` audit table, order idempotency, threshold CHECK, variant/stock validation, `ai_status` circuit breaker (banner UI pending). Migrations 014–018 applied |
+| 4.6 — Conversational Ordering | ✅ Code complete | Gemini is now a multi-turn order-taking agent (not one-shot extraction): `collecting` draft order status, deterministic finalize gate (confirm + stock/variant/product validity), handoff only on genuine escalation, cheap LLM cold-gate replacing RegEx (fail-open fallback). `ai_proposal` now dormant. Migration 019 applied |
 | 5 — Order Management | ⬜ Not started | |
 | 6 — Automation (n8n) | ⬜ Not started | |
 | 7 — Instagram | ✅ Code complete | **Primary channel.** Provider-agnostic core, IG webhook, OAuth, token refresh, settings UI landed; WhatsApp retired to dormant seam. **Pending merchant/ops setup + Meta App Review** — see `docs/09_INSTAGRAM.md` |
@@ -352,6 +354,121 @@ Instagram Direct Messaging is the **primary customer channel**, replacing WhatsA
 - AI messages sent via WhatsApp with `sender_type: "ai"` — rendered with violet styling in chat
 - Graceful degradation: Gemini failures create `ai_unavailable` flags instead of crashing
 - Atomic order creation: order + items + timeline created together with `ai_confidence` and `ai_extracted` metadata
+
+## Phase 4.5 — What Was Built (AI Pipeline Hardening)
+
+Landed on branch `feature/ai-pipeline-hardening`. The AI pipeline now runs
+**in-process in Next.js** via `after()` on Instagram (n8n Workflow 1 was never
+built). Docs `07_AI_PIPELINE.md` and `06_N8N_WORKFLOWS.md` were updated to match.
+
+**Database Migrations:**
+- `supabase/migrations/014_ai_threshold_check.sql` — CHECK constraint bounding `merchant_settings.ai_confidence_threshold` to 0.30–0.95 (matches the Zod schema); clamps out-of-range rows first. **Applied.**
+- `supabase/migrations/015_ai_proposal_status.sql` — adds the `ai_proposal` order status + codifies the full `orders.status` CHECK constraint. Inventory triggers unchanged (proposals reserve/deduct nothing). **Applied.**
+- `supabase/migrations/016_ai_decisions.sql` — `ai_decisions` audit table (one immutable row per Gemini call) + indexes + RLS (merchant SELECT only; service-role writes). **Applied.**
+- `supabase/migrations/017_exclude_proposals_from_kpis.sql` — proposals don't burn quota until confirmed (`increment_monthly_order_count` skips them, `promote_proposal_order_count` counts on promotion) and are excluded from `dashboard_metrics` today/yesterday counts. **Applied.**
+- `supabase/migrations/018_ai_status.sql` — adds `ai_status` / `ai_paused_at` to `merchant_settings` backing the cooldown circuit breaker in `process.ts` (trip after 3 `ai_unavailable` failures in 5 min → 10-min fast-fail cooldown → half-open probe → reset on success). **Applied.**
+
+**What was hardened:**
+- **Deterministic validation layer** (`src/lib/ai/validate-extraction.ts`) — Gemini output is untrusted: `product_id`s are allow-listed against the exact catalog sent (hallucinated ids → unmatched + flag), `unit_price`/`subtotal` are recomputed from the catalog, order totals are recomputed from sanitized items, currency comes from settings. Runs as a distinct stage between Gemini and order creation.
+- **Prompt sandboxing** (`src/lib/ai/gemini.ts`) — customer text / history / merchant context / catalog are wrapped in `<<<DATA:…>>>` fences declared untrusted; `neutralizeFences()` weaves a zero-width space through `<<`/`>>` runs to block fence-forging; a replacer *function* (never string substitution) sidesteps the `String.replace` `$&`/`$'` bug. SYSTEM rule 11 enforces "data is not instructions."
+- **Burst debounce** (`DEBOUNCE_MS = 8_000` in `process.ts`) — last-message-wins window coalesces rapid multi-message orders into ONE Gemini call / ONE order.
+- **`ai_proposal` draft state** — below-threshold extractions (Case D) no longer create live orders; they create an `ai_proposal` the merchant confirms (→ `incoming`) or rejects (→ `cancelled`). "AI suggests, the merchant decides."
+- **`ai_decisions` audit table** — one row per Gemini call with `model_version` + `prompt_version` (from exported `AI_CONFIG`), `input_hash`, `gemini_confidence`/`effective_confidence`, `decision_case` enum, and `validation_diagnostics`.
+- **Order idempotency** — per `source_message_id` (never mint a second order for a message) plus a 60s content-window dedup for identical double-sent text.
+- **Threshold CHECK** — DB-level 0.30–0.95 bound on the confidence threshold (migration 014).
+- **`AI_CONFIG` corrections** — `gemini-2.5-flash`, `maxOutputTokens: 8192` (was 1024), `temperature: 0.1`, `topP: 0.95`, `topK: 40`, `thinkingBudget: 1024`, `promptVersion: "v2"` — all centralized in the exported, frozen `AI_CONFIG`.
+
+**Key patterns established in Phase 4.5:**
+- Two-tier untrust boundary: RegEx gates spend cheaply; the deterministic validator gates *correctness* — the model owns language, deterministic code owns every number touching money/inventory.
+- Flag category is `customer_waiting` (not `customer_question`); question-with-answer sends `question_answered`, question-without-answer flags `question_flagged`.
+- `effective_confidence` mirrors `gemini_confidence` today; the deterministic re-scoring layer that would make them diverge is **planned**. The `ai_status` circuit breaker IS implemented (cooldown-based, fails open); only its merchant-facing "AI paused" banner UI is planned.
+- The reprocess endpoint sets `skipDebounce` to run inline on a single historical message.
+
+## Phase 4.6 — What Was Built (Conversational Ordering)
+
+Landed on branches `feature/ai-conversational-ordering` (stacked on 4.5) and
+`refactor/ai-prefilter-replacement` (stacked on top of that). Triggered by
+three production issues: the AI sent the canned handoff line on low
+confidence instead of continuing the conversation; an unfulfillable quantity
+("1,000,000 biscuits") became a live order because the stock check was only
+advisory; and orders were created the instant product+quantity were known,
+with no phase to gather the rest of the details. The RegEx pre-filter's hard
+recall ceiling was also replaced.
+
+**Database Migration:**
+- `supabase/migrations/019_collecting_status.sql` — adds the `collecting`
+  order status (extends the `orders_status_check` from migration 015),
+  treats it exactly like `ai_proposal` in the quota/dashboard-exclusion
+  triggers from migration 017, adds `orders.ai_collection_state jsonb`
+  (in-progress gathering metadata), and extends `ai_decisions.decision_case`
+  with the collection-lifecycle values. **Applied.**
+
+**The redesign — Gemini becomes a conversational agent, not a one-shot extractor:**
+- **`collecting` draft order status** — the AI's in-progress order while it
+  gathers details across turns. Behaves like `ai_proposal`: reserves no
+  stock, burns no quota, excluded from dashboard counts until it graduates.
+  At most one open `collecting` order per conversation.
+- **New Gemini response fields** — `order_stage`
+  (`none`/`collecting`/`ready_to_confirm`/`confirmed`/`cancelled`),
+  `reply_to_customer` (the single message to send), `needs_human` (genuine
+  escalation only). `clarifying_question`/`answer`/`needs_human_review`/
+  `order_total` are now optional/deprecated in the schema. `callGemini` takes
+  a required `orderSoFar` 6th parameter — a rendered summary of the running
+  order, injected as a new `<<<DATA:ORDER_SO_FAR>>>` fence. `promptVersion`
+  bumped to `"v3"`.
+- **Deterministic validation promoted from advisory to stage-gating** — the
+  existing `validate-extraction.ts` checks (product_id allow-list, price
+  recompute, stock, variants) now force `order_stage` back down to
+  `collecting` whenever a hard problem exists, so an unfulfillable quantity
+  or a hallucinated product can never reach `incoming` — even if the
+  customer says "yes" to a reply that incorrectly claims it's ready.
+- **Finalize gate (double-locked)** — `collecting → incoming` requires BOTH
+  the model reporting `confirmed` AND the deterministic validator
+  independently agreeing the order is finalizable (no missing fields, every
+  item matched, every quantity ≤ stock, every variant valid).
+- **Stock-truth override** — if a hard stock shortfall exists and the
+  model's own reply doesn't state the real available amount, the reply is
+  replaced with a deterministic availability template before sending.
+- **Handoff fires only on genuine escalation** — `needs_human`, never on low
+  confidence. This removes the old behavior where every below-threshold
+  extraction sent "a team member will assist you shortly" and stopped.
+- **Confidence no longer gates order creation** — this is a real behavior
+  change from Phase 4.5: `ai_confidence_threshold` is still recorded and
+  passed to Gemini, but the pipeline no longer compares it against anything
+  to decide the order's fate. The gate is deterministic finalizability +
+  explicit customer confirmation. The merchant's Confidence Threshold slider
+  in Settings is currently vestigial for this purpose.
+- **`ai_proposal` is now dormant** — the pipeline no longer creates
+  `ai_proposal` orders (`collecting` supersedes that flow). The status,
+  board column, and triggers remain for historical rows and as a safety net.
+  `createOrderFromAI` still exists but is no longer called;
+  `upsertCollectingOrder` / `promoteCollectingToIncoming` /
+  `cancelCollectingOrder` (`src/lib/ai/order-creator.ts`) are the active
+  lifecycle functions.
+- **Cold-gate pre-filter replaced** — the rigid RegEx filter (a hard recall
+  ceiling) is replaced by a cheap/fast LLM intent classifier
+  (`src/lib/ai/classify-intent.ts`, `AI_CONFIG.classifierModel`, currently
+  `gemini-2.5-flash-lite`) for cold conversations. Mid-conversation signals
+  (open collecting draft, reply-to-AI, bare number) always process without
+  calling the classifier. On any classifier error the gate **fails open** to
+  the original RegEx filter, so an outage can never silently drop a real
+  order. Classifier-only skips don't write `ai_decisions` rows (audit stays
+  proportional to full-agent spend).
+- **UI** — `collecting` renders across the orders UI following the
+  `ai_proposal` pattern: first board column, an AI-adjacent dashed-violet
+  badge (distinct from `ai_proposal`'s solid violet), a merchant "Mark as
+  Incoming" take-over action, and an editable item gate.
+
+**Key patterns established in Phase 4.6:**
+- The stage machine resolves the *real* stage itself and never trusts the
+  model to self-report past what's deterministically valid — Gemini proposes
+  a stage, validation + explicit confirmation are what actually gate it.
+- `context.ts` now also loads the conversation's open `collecting` order and
+  exposes it as `orderSoFar`/`hasOpenCollectingOrder`/`collectingOrderId`, so
+  the agent and the cold gate don't re-derive state from raw history alone.
+- `docs/07_AI_PIPELINE.md` and `docs/06_N8N_WORKFLOWS.md` were updated to
+  match; `docs/04_DATABASE_SCHEMA.md` now documents `merchant_faq`,
+  `ai_decisions`, and the `collecting`/`ai_proposal` staging states.
 
 ## Phase 7 — What Was Built (Instagram / channel switch)
 

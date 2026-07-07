@@ -1,4 +1,6 @@
 export type OrderStatus =
+  | "collecting"
+  | "ai_proposal"
   | "incoming"
   | "pending"
   | "confirmed"
@@ -75,6 +77,8 @@ export interface OrderBoardColumn {
 }
 
 export const ORDER_BOARD_STATUSES: OrderStatus[] = [
+  "collecting",
+  "ai_proposal",
   "incoming",
   "pending",
   "confirmed",
@@ -83,6 +87,8 @@ export const ORDER_BOARD_STATUSES: OrderStatus[] = [
 ];
 
 export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
+  collecting: "Collecting",
+  ai_proposal: "AI Proposal",
   incoming: "Incoming",
   pending: "Pending",
   confirmed: "Confirmed",
@@ -92,6 +98,14 @@ export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
 };
 
 export const ORDER_ALLOWED_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
+  // Collecting orders are still being taken by the AI in chat. The merchant can
+  // take over (-> incoming, finalizing it themselves) or cancel
+  // (-> cancelled). No status transitions INTO collecting.
+  collecting: ["incoming", "cancelled"],
+  // Proposals are only ever created by the AI pipeline. The merchant either
+  // confirms (-> incoming, joining the live pipeline) or rejects
+  // (-> cancelled). No status transitions INTO ai_proposal.
+  ai_proposal: ["incoming", "cancelled"],
   incoming: ["pending", "confirmed", "cancelled"],
   pending: ["confirmed", "cancelled", "incoming"],
   confirmed: ["out_for_delivery", "cancelled"],

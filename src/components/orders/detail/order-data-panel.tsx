@@ -43,7 +43,10 @@ function toEditableItem(item: OrderItem): EditableItem {
 }
 
 export function OrderDataPanel({ order, onOrderChange }: OrderDataPanelProps) {
-  const editable = order.status === "incoming" || order.status === "pending";
+  const editable =
+    order.status === "collecting" ||
+    order.status === "incoming" ||
+    order.status === "pending";
   const [items, setItems] = useState<EditableItem[]>(
     order.order_items.map(toEditableItem)
   );

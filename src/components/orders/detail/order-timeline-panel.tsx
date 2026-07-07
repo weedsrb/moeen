@@ -11,6 +11,12 @@ interface OrderTimelinePanelProps {
 
 function statusDotClass(status: OrderStatus): string {
   switch (status) {
+    case "collecting":
+      // AI-adjacent but muted — distinct from ai_proposal's solid violet.
+      return "bg-ai/60";
+    case "ai_proposal":
+      // Violet AI token — reserved for AI-generated content.
+      return "bg-ai";
     case "incoming":
       return "bg-status-incoming";
     case "pending":

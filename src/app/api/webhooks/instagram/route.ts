@@ -4,6 +4,10 @@ import { InstagramProvider } from "@/lib/messaging/instagram";
 import { processInboundMessage } from "@/lib/ai/process";
 import type { InstagramWebhookPayload } from "@/types/instagram";
 
+// The AI pipeline now debounces bursts (sleeps ~8s) before calling Gemini
+// (with a retry) inside after(). Give the function headroom on Vercel.
+export const maxDuration = 60;
+
 /**
  * Single app-level Instagram webhook endpoint (no [merchantId] in the path —
  * one Mo'een app serves all merchants). Events arrive keyed by the IG business
@@ -179,7 +183,7 @@ export async function POST(request: NextRequest) {
             has_order_signal: false,
             ai_processed: false,
           })
-          .select("id")
+          .select("id, created_at")
           .single();
 
         // Update conversation metadata for existing conversations
@@ -217,6 +221,7 @@ export async function POST(request: NextRequest) {
                 igUserId: settings.instagram_user_id!,
                 accessToken: settings.instagram_access_token!,
               },
+              messageCreatedAt: savedMessage.created_at,
             })
           );
         }

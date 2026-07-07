@@ -32,7 +32,7 @@ export async function POST(request: NextRequest) {
   const admin = createAdminClient();
   const { data: message } = await admin
     .from("messages")
-    .select("id, conversation_id, content, merchant_id, message_type")
+    .select("id, conversation_id, content, merchant_id, message_type, created_at")
     .eq("id", parsed.data.messageId)
     .eq("merchant_id", merchant.id)
     .single();
@@ -81,6 +81,10 @@ export async function POST(request: NextRequest) {
     chatId: conversation.platform_chat_id,
     platform: conversation.platform,
     credentials,
+    messageCreatedAt: message.created_at,
+    // Reprocess runs inline on a single historical message — sleeping and
+    // burst-gathering make no sense here.
+    skipDebounce: true,
   });
 
   return NextResponse.json({ success: true });
