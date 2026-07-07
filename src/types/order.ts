@@ -1,8 +1,6 @@
 export type OrderStatus =
   | "collecting"
-  | "ai_proposal"
   | "incoming"
-  | "pending"
   | "confirmed"
   | "out_for_delivery"
   | "delivered"
@@ -12,7 +10,7 @@ export interface Order {
   id: string;
   merchant_id: string;
   customer_id: string;
-  conversation_id: string;
+  conversation_id: string | null;
   order_number: string;
   status: OrderStatus;
   delivery_address: string | null;
@@ -78,19 +76,17 @@ export interface OrderBoardColumn {
 
 export const ORDER_BOARD_STATUSES: OrderStatus[] = [
   "collecting",
-  "ai_proposal",
   "incoming",
-  "pending",
   "confirmed",
   "out_for_delivery",
-  "delivered",
 ];
+
+// Terminal statuses live in the Order History view, not the live board/list.
+export const ORDER_HISTORY_STATUSES: OrderStatus[] = ["delivered", "cancelled"];
 
 export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
   collecting: "Collecting",
-  ai_proposal: "AI Proposal",
   incoming: "Incoming",
-  pending: "Pending",
   confirmed: "Confirmed",
   out_for_delivery: "Out for Delivery",
   delivered: "Delivered",
@@ -102,12 +98,7 @@ export const ORDER_ALLOWED_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   // take over (-> incoming, finalizing it themselves) or cancel
   // (-> cancelled). No status transitions INTO collecting.
   collecting: ["incoming", "cancelled"],
-  // Proposals are only ever created by the AI pipeline. The merchant either
-  // confirms (-> incoming, joining the live pipeline) or rejects
-  // (-> cancelled). No status transitions INTO ai_proposal.
-  ai_proposal: ["incoming", "cancelled"],
-  incoming: ["pending", "confirmed", "cancelled"],
-  pending: ["confirmed", "cancelled", "incoming"],
+  incoming: ["confirmed", "cancelled"],
   confirmed: ["out_for_delivery", "cancelled"],
   out_for_delivery: ["delivered", "cancelled"],
   delivered: [],

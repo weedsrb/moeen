@@ -8,17 +8,10 @@ export function statusColorClass(s: OrderStatus): string {
   switch (s) {
     case "collecting":
       // Still being taken by the AI in chat — AI-adjacent (uses the `ai`
-      // token) but visually distinct from the solid violet of ai_proposal
-      // via a lighter tint and dashed border.
+      // token) with a lighter tint and dashed border.
       return "text-ai border-ai/50 border-dashed bg-ai/5";
-    case "ai_proposal":
-      // Violet (`--color-ai`) is reserved exclusively for AI-generated
-      // content — an AI proposal is exactly that.
-      return "text-ai border-ai bg-ai/10";
     case "incoming":
       return "text-status-incoming border-status-incoming bg-status-incoming/10";
-    case "pending":
-      return "text-status-pending border-status-pending bg-status-pending/10";
     case "confirmed":
       return "text-status-confirmed border-status-confirmed bg-status-confirmed/10";
     case "out_for_delivery":

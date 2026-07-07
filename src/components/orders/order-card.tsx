@@ -5,6 +5,13 @@ import { motion } from "framer-motion";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { Badge } from "@/components/ui/badge";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
 import { formatPrice } from "@/lib/utils/inventory";
 import {
@@ -12,11 +19,13 @@ import {
   statusColorClass,
   timeElapsed,
 } from "@/lib/utils/orders";
-import type { OrderWithCustomer } from "@/types/order";
+import { ORDER_ALLOWED_TRANSITIONS, ORDER_STATUS_LABELS } from "@/types/order";
+import type { OrderStatus, OrderWithCustomer } from "@/types/order";
 
 interface OrderCardProps {
   order: OrderWithCustomer;
   draggable?: boolean;
+  onStatusChange?: (orderId: string, status: OrderStatus) => Promise<void>;
 }
 
 function itemsSummary(order: OrderWithCustomer): string {
@@ -27,11 +36,12 @@ function itemsSummary(order: OrderWithCustomer): string {
   return `${count} ${count === 1 ? "item" : "items"} - ${visible}${suffix}`;
 }
 
-export function OrderCard({ order, draggable }: OrderCardProps) {
+export function OrderCard({ order, draggable, onStatusChange }: OrderCardProps) {
   const colorClass = statusColorClass(order.status);
   const customerName = order.customers?.name ?? "Unknown customer";
+  const nextStatuses = ORDER_ALLOWED_TRANSITIONS[order.status];
 
-  return (
+  const card = (
     <motion.div
       layout
       layoutId={order.id}
@@ -80,9 +90,46 @@ export function OrderCard({ order, draggable }: OrderCardProps) {
       </Link>
     </motion.div>
   );
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger>{card}</ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem
+          onClick={() => navigator.clipboard.writeText(order.order_number)}
+        >
+          Copy order number
+        </ContextMenuItem>
+        {onStatusChange && nextStatuses.length > 0 && (
+          <>
+            <ContextMenuSeparator />
+            {nextStatuses.map((status) => (
+              <ContextMenuItem
+                key={status}
+                variant={status === "cancelled" ? "destructive" : "default"}
+                onClick={() => {
+                  onStatusChange(order.id, status).catch(() => {});
+                }}
+              >
+                {status === "cancelled"
+                  ? "Cancel order"
+                  : `Mark as ${ORDER_STATUS_LABELS[status]}`}
+              </ContextMenuItem>
+            ))}
+          </>
+        )}
+      </ContextMenuContent>
+    </ContextMenu>
+  );
 }
 
-export function SortableOrderCard({ order }: { order: OrderWithCustomer }) {
+export function SortableOrderCard({
+  order,
+  onStatusChange,
+}: {
+  order: OrderWithCustomer;
+  onStatusChange?: (orderId: string, status: OrderStatus) => Promise<void>;
+}) {
   const {
     attributes,
     listeners,
@@ -103,7 +150,7 @@ export function SortableOrderCard({ order }: { order: OrderWithCustomer }) {
 
   return (
     <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
-      <OrderCard order={order} draggable />
+      <OrderCard order={order} draggable onStatusChange={onStatusChange} />
     </div>
   );
 }

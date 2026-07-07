@@ -2,6 +2,7 @@ import { PageTransition } from "@/components/layout/page-transition";
 import { OrdersContent } from "@/components/orders/orders-content";
 import { createClient } from "@/lib/supabase/server";
 import { requireMerchant } from "@/lib/auth/require-merchant";
+import { ORDER_BOARD_STATUSES } from "@/types/order";
 import type { OrderWithCustomer } from "@/types/order";
 
 export default async function OrdersPage({
@@ -17,6 +18,7 @@ export default async function OrdersPage({
     .from("orders")
     .select("*, customers(id, name, phone, platform), order_items(*)")
     .eq("merchant_id", merchant.id)
+    .in("status", ORDER_BOARD_STATUSES)
     .order("created_at", { ascending: false })
     .limit(200);
   const orders = (data ?? []) as OrderWithCustomer[];

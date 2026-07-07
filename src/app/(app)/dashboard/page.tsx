@@ -10,7 +10,6 @@ import { requireMerchant } from "@/lib/auth/require-merchant";
 import type { DashboardMetrics } from "@/types/dashboard";
 import {
   ClipboardList,
-  Clock,
   CheckCircle2,
   Truck,
   AlertTriangle,
@@ -49,14 +48,6 @@ export default async function DashboardPage() {
         current: metrics?.today_orders ?? 0,
         previous: metrics?.yesterday_orders ?? 0,
       },
-    },
-    {
-      title: "Pending",
-      value: metrics?.pending_orders ?? 0,
-      icon: Clock,
-      color: "text-status-pending",
-      href: "/orders?status=pending",
-      trend: null,
     },
     {
       title: "Confirmed",
@@ -99,7 +90,7 @@ export default async function DashboardPage() {
         {!instagramConnected && <InstagramPrompt />}
 
         {/* KPI Cards */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           {kpiCards.map((kpi) => {
             const Icon = kpi.icon;
             return (

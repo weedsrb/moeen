@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { requireMerchantForApi } from "@/lib/auth/require-merchant";
 import { createManualOrderSchema, orderStatusSchema } from "@/lib/validations/order";
+import { ORDER_BOARD_STATUSES, ORDER_HISTORY_STATUSES } from "@/types/order";
 import type { OrderWithCustomer } from "@/types/order";
 
 export async function GET(request: NextRequest) {
@@ -11,6 +12,7 @@ export async function GET(request: NextRequest) {
   const supabase = await createClient();
   const searchParams = request.nextUrl.searchParams;
   const statusParam = searchParams.get("status");
+  const history = searchParams.get("history") === "true";
   const search = searchParams.get("search")?.trim().toLowerCase() ?? "";
   const from = searchParams.get("from");
   const to = searchParams.get("to");
@@ -18,6 +20,8 @@ export async function GET(request: NextRequest) {
   const limit = Number.isFinite(limitParam)
     ? Math.min(Math.max(Math.trunc(limitParam), 1), 500)
     : 100;
+  const offsetParam = Number(searchParams.get("offset") ?? "0");
+  const offset = Number.isFinite(offsetParam) ? Math.max(Math.trunc(offsetParam), 0) : 0;
 
   const status = statusParam ? orderStatusSchema.safeParse(statusParam) : null;
   if (statusParam && !status?.success) {
@@ -29,12 +33,14 @@ export async function GET(request: NextRequest) {
     .select("*, customers(id, name, phone, platform), order_items(*)")
     .eq("merchant_id", auth.merchant.id)
     .order("created_at", { ascending: false })
-    .limit(limit);
+    .range(offset, offset + limit - 1);
 
   if (status?.success) {
     query = query.eq("status", status.data);
+  } else if (history) {
+    query = query.in("status", ORDER_HISTORY_STATUSES);
   } else {
-    query = query.neq("status", "cancelled");
+    query = query.in("status", ORDER_BOARD_STATUSES);
   }
 
   if (from) query = query.gte("created_at", from);
@@ -84,41 +90,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Customer not found" }, { status: 404 });
   }
 
-  const { data: existingConversation } = await supabase
-    .from("conversations")
-    .select("id")
-    .eq("merchant_id", auth.merchant.id)
-    .eq("customer_id", parsed.data.customer_id)
-    .eq("platform", "manual")
-    .maybeSingle();
-
-  let conversationId = existingConversation?.id ?? null;
-
-  if (!conversationId) {
-    const { data: conversation, error: conversationError } = await supabase
-      .from("conversations")
-      .insert({
-        merchant_id: auth.merchant.id,
-        customer_id: parsed.data.customer_id,
-        platform: "manual",
-        platform_chat_id: `manual:${parsed.data.customer_id}`,
-        last_message_at: new Date().toISOString(),
-        last_message_preview: "Manual order",
-        unread_count: 0,
-      })
-      .select("id")
-      .single();
-
-    if (conversationError || !conversation) {
-      return NextResponse.json(
-        { error: conversationError?.message ?? "Failed to create conversation" },
-        { status: 500 }
-      );
-    }
-
-    conversationId = conversation.id;
-  }
-
+  // Manual orders carry no conversation — they don't originate from a chat, so
+  // they must not create a synthetic one that pollutes the Messages page.
   type ManualOrderResult = {
     order_id: string;
     order_number: string;
@@ -127,7 +100,7 @@ export async function POST(request: NextRequest) {
   const { data, error } = await supabase.rpc("create_manual_order", {
     p_merchant_id: auth.merchant.id,
     p_customer_id: parsed.data.customer_id,
-    p_conversation_id: conversationId,
+    p_conversation_id: null,
     p_delivery_address: parsed.data.delivery_address ?? null,
     p_notes: parsed.data.notes ?? null,
     p_currency: parsed.data.currency,

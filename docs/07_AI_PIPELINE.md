@@ -390,9 +390,8 @@ Three helpers built on top of the diagnostics drive the stage machine:
 ## Stage 6: Collecting Order Lifecycle & Decision Tree
 
 There is at most **one open `collecting` order per conversation** — the
-AI's working draft while it gathers details. A `collecting` order behaves like
-`ai_proposal` (its predecessor concept, see below): it reserves no stock,
-burns no quota, and is excluded from dashboard order counts until it
+AI's working draft while it gathers details. A `collecting` order reserves no
+stock, burns no quota, and is excluded from dashboard order counts until it
 graduates.
 
 ### Resolving the real stage (never trust the model to upgrade past valid)
@@ -436,18 +435,31 @@ trigger a handoff — they just mean the AI keeps the conversation going. (This
 replaces the old behavior where a below-threshold extraction always sent the
 canned handoff line and stopped.)
 
-### `ai_proposal` — dormant, not removed
+### `ai_proposal` — retired (order lifecycle v2, migration 020)
 
 Before this redesign, a below-threshold one-shot extraction created an
 **`ai_proposal`** order (a status the merchant explicitly confirmed or
-rejected). The stage machine above supersedes that flow — the pipeline no
-longer creates `ai_proposal` orders. The status, its board column, its
-transitions, and the quota/dashboard exclusions all remain in place (existing
-rows, and as a safety net), but they are dormant from the AI's perspective.
+rejected). The stage machine above superseded that flow, and the pipeline
+stopped creating `ai_proposal` orders — but for a while the status, its board
+column, its transitions, and the quota/dashboard exclusions stayed in place
+as dormant historical support. Migration 020 (order lifecycle v2) removed it
+for real: existing `ai_proposal` rows were migrated to `cancelled`, the
+status was dropped from the `orders_status_check` CHECK constraint, and
 `createOrderFromAI` (the function that used to mint `ai_proposal`/`incoming`
-orders directly) still exists but is no longer called; `upsertCollectingOrder`
-/ `promoteCollectingToIncoming` / `cancelCollectingOrder`
-(`src/lib/ai/order-creator.ts`) are the active lifecycle functions now.
+orders directly, unused since this redesign) was deleted.
+`upsertCollectingOrder` / `promoteCollectingToIncoming` /
+`cancelCollectingOrder` (`src/lib/ai/order-creator.ts`) are the only order
+lifecycle functions the AI pipeline calls now.
+
+The same migration also retired the merchant-side `pending` status — the
+finalize gate above already requires explicit customer confirmation before
+an order reaches `incoming`, so a separate "awaiting confirmation" step was
+redundant. The live lifecycle is now 6 statuses: `collecting → incoming →
+confirmed → out_for_delivery → delivered`, with `cancelled` reachable from
+any non-terminal state. Stock reservation moved one stage earlier —
+`incoming` reserves stock (previously only `pending` did). `delivered` and
+`cancelled` orders are surfaced in the Orders page's History tab rather than
+the live board/list.
 
 ---
 

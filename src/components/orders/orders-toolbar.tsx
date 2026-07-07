@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { DateRangePicker } from "@/components/ui/date-range-picker";
 import {
   Select,
   SelectContent,
@@ -10,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ORDER_STATUS_LABELS } from "@/types/order";
+import { ORDER_BOARD_STATUSES, ORDER_STATUS_LABELS } from "@/types/order";
 import type { OrderStatus } from "@/types/order";
 import { ManualOrderSheet } from "./manual-order-sheet";
 
@@ -51,9 +52,8 @@ export function OrdersToolbar({
     return () => window.clearTimeout(timer);
   }, [onSearchChange, searchInput]);
 
-  function setDate(field: "from" | "to", value: string) {
-    const next = { ...(dateRange ?? {}), [field]: value || undefined };
-    onDateRangeChange(next.from || next.to ? next : null);
+  function handleDateRangeChange(from: string | undefined, to: string | undefined) {
+    onDateRangeChange(from || to ? { from, to } : null);
   }
 
   return (
@@ -78,28 +78,20 @@ export function OrdersToolbar({
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All statuses</SelectItem>
-              {Object.entries(ORDER_STATUS_LABELS).map(([status, label]) => (
+              {ORDER_BOARD_STATUSES.map((status) => (
                 <SelectItem key={status} value={status}>
-                  {label}
+                  {ORDER_STATUS_LABELS[status]}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
 
-          <div className="flex gap-2">
-            <Input
-              type="date"
-              value={dateRange?.from ?? ""}
-              onChange={(event) => setDate("from", event.target.value)}
-              className="w-full sm:w-36"
-            />
-            <Input
-              type="date"
-              value={dateRange?.to ?? ""}
-              onChange={(event) => setDate("to", event.target.value)}
-              className="w-full sm:w-36"
-            />
-          </div>
+          <DateRangePicker
+            from={dateRange?.from}
+            to={dateRange?.to}
+            onChange={handleDateRangeChange}
+            className="w-full sm:w-auto"
+          />
         </div>
 
         <div className="flex items-center gap-2">

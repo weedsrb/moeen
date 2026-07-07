@@ -170,7 +170,7 @@ The merchant's product catalog.
 | `currency` | text | DEFAULT 'ILS' | Currency code |
 | `image_url` | text | NULL | Supabase Storage URL |
 | `quantity_total` | integer | NOT NULL DEFAULT 0 | Total inventory count |
-| `quantity_reserved` | integer | DEFAULT 0 | Reserved by pending orders |
+| `quantity_reserved` | integer | DEFAULT 0 | Reserved by `incoming` orders (migration 020) |
 | `low_stock_threshold` | integer | NULL | Override merchant default |
 | `variants` | jsonb | NULL | e.g. [{"name": "size", "options": ["S", "M", "L"]}] |
 | `is_active` | boolean | DEFAULT true | Is product available for ordering? |
@@ -194,7 +194,7 @@ The core order table. One order per customer interaction that contains order int
 | `customer_id` | uuid | FK → customers, NOT NULL | |
 | `conversation_id` | uuid | FK → conversations, NOT NULL | |
 | `order_number` | text | UNIQUE, NOT NULL | Human-readable: MOE-XXXXX |
-| `status` | text | NOT NULL DEFAULT 'incoming', CHECK (migration 015, extended 019) | `ai_proposal`, `collecting`, `incoming`, `pending`, `confirmed`, `out_for_delivery`, `delivered`, `cancelled` |
+| `status` | text | NOT NULL DEFAULT 'incoming', CHECK (order lifecycle v2, migration 020) | `collecting`, `incoming`, `confirmed`, `out_for_delivery`, `delivered`, `cancelled` |
 | `delivery_address` | text | NULL | Delivery address for this order |
 | `subtotal` | decimal | DEFAULT 0 | Sum of line items |
 | `total` | decimal | DEFAULT 0 | Final total (subtotal + any fees) |
@@ -214,13 +214,21 @@ The core order table. One order per customer interaction that contains order int
 **Index:** `(merchant_id, created_at)` for date range queries
 **RLS Policy:** `merchant_id IN (SELECT id FROM merchants WHERE user_id = auth.uid())`
 
-> `ai_proposal` and `collecting` are **pre-order staging states**: neither
-> reserves stock, deducts inventory, nor counts toward `monthly_order_count`
-> or the dashboard's daily order counts until it graduates into a real order
-> (`incoming` or later). `collecting` is the AI's active multi-turn gathering
-> draft (current pipeline behavior); `ai_proposal` was its below-threshold
-> one-shot predecessor and is now dormant (no longer created by the AI, but
-> the status/UI/triggers remain for historical rows — see `07_AI_PIPELINE.md`).
+> `collecting` is a **pre-order staging state**: it reserves no stock,
+> deducts no inventory, and doesn't count toward `monthly_order_count` or the
+> dashboard's daily order counts until it graduates into a real order
+> (`incoming` or later). It's the AI's active multi-turn gathering draft.
+>
+> **Order lifecycle v2 (migration 020)** collapsed the prior 8-status model
+> down to 6: `ai_proposal` (dead since the Phase 4.6 conversational redesign
+> — never created; existing rows were migrated to `cancelled`) and `pending`
+> (redundant once the finalize gate started requiring explicit customer
+> confirmation before `incoming` — existing rows were migrated to `incoming`)
+> were both retired. Stock reservation moved one stage earlier as part of
+> this: `incoming` now reserves stock (previously only `pending` did),
+> `confirmed` still deducts + clears the reservation. `delivered` and
+> `cancelled` orders are excluded from the live board/list by default and
+> surfaced instead in the Orders page's History tab (`GET /api/orders?history=true`).
 
 ---
 
@@ -390,10 +398,11 @@ CREATE POLICY "Merchants can delete own data"
 Generates human-readable order numbers: `MOE-00001`, `MOE-00002`, etc. Per-merchant sequential.
 
 ### update_inventory_on_status_change()
-Trigger function: when order status changes, automatically adjusts inventory.
-- `→ pending`: reserve inventory (quantity_reserved += item quantities)
-- `→ confirmed`: deduct from total (quantity_total -= item quantities, quantity_reserved -= item quantities)
-- `→ cancelled`: release reservation (quantity_reserved -= item quantities)
+Trigger function: when order status changes, automatically adjusts inventory (rewritten in migration 020 for the 6-status lifecycle).
+- `collecting → incoming`: reserve inventory (quantity_reserved += item quantities)
+- `incoming → confirmed`: deduct from total (quantity_total -= item quantities, quantity_reserved -= item quantities)
+- `incoming → cancelled`: release reservation (quantity_reserved -= item quantities)
+- `confirmed/out_for_delivery/delivered → cancelled`: restore stock (quantity_total += item quantities)
 
 ### increment_monthly_order_count()
 Trigger function: when order is created, increment merchant's monthly_order_count. Reset on billing cycle (cron job).

@@ -30,20 +30,21 @@ function ChatPanel({
   conversationId,
   merchantId,
 }: {
-  conversationId: string;
+  conversationId: string | null;
   merchantId: string;
 }) {
   const sendRef = useRef<ChatSendRef | null>(null);
   const [isManual, setIsManual] = useState(false);
 
   useEffect(() => {
+    if (!conversationId) return;
     const supabase = createClient();
 
     async function loadConversationPlatform() {
       const { data } = await supabase
         .from("conversations")
         .select("platform")
-        .eq("id", conversationId)
+        .eq("id", conversationId!)
         .eq("merchant_id", merchantId)
         .single();
 
@@ -52,6 +53,25 @@ function ChatPanel({
 
     loadConversationPlatform();
   }, [conversationId, merchantId]);
+
+  // Manual orders (or any order with no linked conversation) have no channel.
+  if (!conversationId) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-border bg-card">
+        <div className="border-b border-border px-4 py-3">
+          <h2 className="text-sm font-semibold">Chat</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Manual order - no external channel
+          </p>
+        </div>
+        <div className="flex flex-1 items-center justify-center p-6">
+          <p className="text-sm text-muted-foreground">
+            This order was created manually and has no conversation.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-border bg-card">
