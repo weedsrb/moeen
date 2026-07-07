@@ -103,7 +103,6 @@ const heroOrders: DashboardOrder[] = [
 
 const heroDashboardMetrics = {
   incoming_orders: 12,
-  pending_orders: 4,
   confirmed_orders: 18,
   delivery_orders: 6,
   open_flags: 3,
@@ -594,13 +593,6 @@ function HeroDashboardContent() {
       },
     },
     {
-      title: "Pending",
-      value: metrics.pending_orders,
-      icon: Clock,
-      color: "text-status-pending",
-      trend: null,
-    },
-    {
       title: "Confirmed",
       value: metrics.confirmed_orders,
       icon: CheckCircle2,
@@ -633,7 +625,7 @@ function HeroDashboardContent() {
     <div className="space-y-6">
       <h1 className="text-2xl font-semibold">Dashboard</h1>
 
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         {kpiCards.map((kpi, index) => {
           const Icon = kpi.icon;
           return (

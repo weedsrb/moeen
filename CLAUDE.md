@@ -159,7 +159,8 @@ Core tables: `merchant_faq` (AI knowledge base Q&A pairs per merchant)
 | 3 — WhatsApp Integration | ✅ Complete | WhatsApp Cloud API connection, webhook receiver, real-time conversations, send/receive messages, unread badges |
 | 4 — AI Pipeline | ✅ Complete | Gemini 2.5 Flash, regex pre-filter, order extraction, confidence-based decisions, AI settings UI, FAQ knowledge base |
 | 4.5 — AI Pipeline Hardening | ✅ Code complete | Deterministic validation layer, prompt sandboxing, 8s burst debounce, `ai_proposal` draft state, `ai_decisions` audit table, order idempotency, threshold CHECK, variant/stock validation, `ai_status` circuit breaker (banner UI pending). Migrations 014–018 applied |
-| 4.6 — Conversational Ordering | ✅ Code complete | Gemini is now a multi-turn order-taking agent (not one-shot extraction): `collecting` draft order status, deterministic finalize gate (confirm + stock/variant/product validity), handoff only on genuine escalation, cheap LLM cold-gate replacing RegEx (fail-open fallback). `ai_proposal` now dormant. Migration 019 applied |
+| 4.6 — Conversational Ordering | ✅ Code complete | Gemini is now a multi-turn order-taking agent (not one-shot extraction): `collecting` draft order status, deterministic finalize gate (confirm + stock/variant/product validity), handoff only on genuine escalation, cheap LLM cold-gate replacing RegEx (fail-open fallback). Migration 019 applied. (`ai_proposal`, dormant here, was fully retired in 4.7 below) |
+| 4.7 — Order Lifecycle v2 | ✅ Code complete | Collapsed the 8-status order model to 6 (`ai_proposal` and `pending` retired), added the Orders page's History tab for `delivered`/`cancelled` orders. Migration 020 applied |
 | 5 — Order Management | ⬜ Not started | |
 | 6 — Automation (n8n) | ⬜ Not started | |
 | 7 — Instagram | ✅ Code complete | **Primary channel.** Provider-agnostic core, IG webhook, OAuth, token refresh, settings UI landed; WhatsApp retired to dormant seam. **Pending merchant/ops setup + Meta App Review** — see `docs/09_INSTAGRAM.md` |
@@ -469,6 +470,52 @@ recall ceiling was also replaced.
 - `docs/07_AI_PIPELINE.md` and `docs/06_N8N_WORKFLOWS.md` were updated to
   match; `docs/04_DATABASE_SCHEMA.md` now documents `merchant_faq`,
   `ai_decisions`, and the `collecting`/`ai_proposal` staging states.
+
+## Phase 4.7 — What Was Built (Order Lifecycle v2)
+
+The 8-status order model grew organically across 4.5–4.6 and had become
+confusing: `ai_proposal` was fully dead code (no caller since 4.6's
+conversational redesign), and merchant-side `pending` no longer answered a
+live question once the finalize gate started requiring explicit customer
+confirmation before `incoming`. Landed on branch `refactor/ai-prefilter-replacement`.
+
+**Database Migration:**
+- `supabase/migrations/020_order_lifecycle_v2.sql` — backfills stock
+  reservations for existing `incoming` orders (reservation now happens on
+  entry to `incoming` instead of `pending`), migrates existing `pending` rows
+  to `incoming` and `ai_proposal` rows to `cancelled` (with audit
+  `order_timeline` rows), shrinks `orders_status_check` to 6 values,
+  rewrites `update_inventory_on_status_change()` /
+  `reserve_inventory_on_order_insert()` for the new reservation timing,
+  points `create_manual_order` at `incoming` (was hardcoded `pending`,
+  inconsistent with the AI-created path), and simplifies the quota/dashboard
+  functions' staging-state checks to just `collecting`. **Applied.**
+
+**New lifecycle:** `collecting → incoming → confirmed → out_for_delivery →
+delivered`, with `cancelled` reachable from any non-terminal state.
+
+**Order History:** `delivered`/`cancelled` orders no longer stay on the live
+board/list forever — the Orders page (`src/app/(app)/orders/page.tsx`,
+`src/components/orders/orders-content.tsx`) now has an Active/History tab
+toggle (shadcn `Tabs`). Active is the existing board/list, now always
+active-status-only. History is a new self-fetching, paginated component
+(`src/components/orders/order-history.tsx`) hitting
+`GET /api/orders?history=true` with offset pagination (`Load more`), reusing
+`OrdersList` for rendering. `src/lib/ai/order-creator.ts`'s dead
+`createOrderFromAI` was deleted.
+
+**Key patterns established in Phase 4.7:**
+- Historical `order_timeline` rows can still carry retired status strings
+  (`pending`, `ai_proposal`) in `from_status`/`to_status` — the timeline
+  panel's label/dot-color lookups fall back gracefully instead of assuming
+  every row matches the current 6-value `OrderStatus` union.
+- The shared `/api/orders` GET route applies `search` in-memory after the
+  DB-level `.range()` pagination, so History uses a wide single-batch fetch
+  while searching (mirrors the main Orders list's existing bounded-fetch
+  convention) rather than paginating unreliably underneath a search term.
+- `OrderHistory` uses `useTransition` instead of a manual loading `useState`
+  for its fetch effect — avoids the `react-hooks/set-state-in-effect` lint
+  rule that flags synchronous `setState` calls inside effects.
 
 ## Phase 7 — What Was Built (Instagram / channel switch)
 

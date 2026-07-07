@@ -9,18 +9,17 @@ interface OrderTimelinePanelProps {
   currentStatus: OrderStatus;
 }
 
+// Timeline entries are historical and immutable — rows logged before the
+// order lifecycle v2 migration (020) can still carry retired status strings
+// like "pending"/"ai_proposal" in from_status/to_status. Fall back to a
+// neutral dot for any status outside the current 6-value set rather than
+// rendering nothing.
 function statusDotClass(status: OrderStatus): string {
   switch (status) {
     case "collecting":
-      // AI-adjacent but muted — distinct from ai_proposal's solid violet.
       return "bg-ai/60";
-    case "ai_proposal":
-      // Violet AI token — reserved for AI-generated content.
-      return "bg-ai";
     case "incoming":
       return "bg-status-incoming";
-    case "pending":
-      return "bg-status-pending";
     case "confirmed":
       return "bg-status-confirmed";
     case "out_for_delivery":
@@ -29,7 +28,15 @@ function statusDotClass(status: OrderStatus): string {
       return "bg-status-delivered";
     case "cancelled":
       return "bg-status-cancelled";
+    default:
+      return "bg-muted-foreground";
   }
+}
+
+// Same rationale as statusDotClass above — historical timeline entries may
+// reference a retired status no longer present in ORDER_STATUS_LABELS.
+function statusLabel(status: OrderStatus): string {
+  return ORDER_STATUS_LABELS[status] ?? status;
 }
 
 export function OrderTimelinePanel({
@@ -76,10 +83,8 @@ export function OrderTimelinePanel({
             <div className={cn("space-y-1", !isLast && "pb-6")}>
               <p className="text-sm font-medium">
                 {entry.from_status
-                  ? `${ORDER_STATUS_LABELS[entry.from_status]} -> ${
-                      ORDER_STATUS_LABELS[entry.to_status]
-                    }`
-                  : `Created as ${ORDER_STATUS_LABELS[entry.to_status]}`}
+                  ? `${statusLabel(entry.from_status)} -> ${statusLabel(entry.to_status)}`
+                  : `Created as ${statusLabel(entry.to_status)}`}
               </p>
               <p className="font-mono text-xs text-muted-foreground">
                 {entry.changed_by} - {new Date(entry.created_at).toLocaleString()}

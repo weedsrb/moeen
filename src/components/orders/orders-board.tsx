@@ -83,6 +83,7 @@ export function OrdersBoard({ orders, onStatusChange }: OrdersBoardProps) {
             orders={orders.filter((order) => order.status === status)}
             errorOrderId={errorOrderId}
             errorMessage={errorMessage}
+            onStatusChange={onStatusChange}
           />
         ))}
       </div>

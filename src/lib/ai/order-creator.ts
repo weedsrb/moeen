@@ -8,145 +8,11 @@ import type {
 import { canTransition } from "@/types/order";
 import type { OrderStatus } from "@/types/order";
 
-interface CreateOrderParams {
-  merchantId: string;
-  customerId: string;
-  conversationId: string;
-  messageId: string;
-  geminiResponse: GeminiResponse;
-  /** The exact product set sent to Gemini — used to validate product_ids/prices. */
-  catalog: CompressedProduct[];
-  /** Merchant currency from settings — replaces the old hardcoded "ILS". */
-  currency: string;
-  /**
-   * Lifecycle status the order is minted in. High-confidence extractions
-   * (Cases A/C) create a live `"incoming"` order; below-threshold extractions
-   * (Case D) create an `"ai_proposal"` the merchant must confirm or reject, so
-   * unreviewed AI guesses never enter the live order stats. Defaults to
-   * `"incoming"`.
-   */
-  status?: "incoming" | "ai_proposal";
-}
-
 interface CreateOrderResult {
   orderId: string;
   orderNumber: string;
   /** What deterministic validation had to correct — surfaced by the caller. */
   diagnostics: ValidationDiagnostics;
-}
-
-/**
- * Create an order + order_items + timeline entry from a Gemini extraction.
- *
- * Idempotent at the order level: if an order already exists for this
- * source message (e.g. the reprocess endpoint re-runs the pipeline), the
- * existing order is returned instead of creating a duplicate.
- */
-export async function createOrderFromAI(
-  supabase: SupabaseClient,
-  params: CreateOrderParams
-): Promise<CreateOrderResult> {
-  const {
-    merchantId,
-    customerId,
-    conversationId,
-    messageId,
-    geminiResponse,
-    catalog,
-    currency,
-    status = "incoming",
-  } = params;
-
-  // --- Idempotency: never mint a second order for the same source message ---
-  const { data: existing } = await supabase
-    .from("orders")
-    .select("id, order_number")
-    .eq("merchant_id", merchantId)
-    .eq("source_message_id", messageId)
-    .maybeSingle();
-
-  if (existing) {
-    console.log(
-      "[AI Pipeline] order already exists for message → skipping create"
-    );
-    return {
-      orderId: existing.id,
-      orderNumber: existing.order_number,
-      diagnostics: { invalidProductIds: [], priceCorrections: 0 },
-    };
-  }
-
-  // --- Deterministic validation (Gemini output is untrusted) ---
-  const validation = validateExtraction(geminiResponse, catalog);
-
-  const { data: numberData } = await supabase.rpc("generate_order_number", {
-    p_merchant_id: merchantId,
-  });
-  const orderNumber = numberData as string;
-
-  // Totals come from the sanitized items, not from Gemini.
-  const { subtotal, total, items: validatedItems, diagnostics } = validation;
-
-  // Insert order
-  const { data: order, error: orderError } = await supabase
-    .from("orders")
-    .insert({
-      merchant_id: merchantId,
-      customer_id: customerId,
-      conversation_id: conversationId,
-      order_number: orderNumber,
-      status,
-      delivery_address:
-        geminiResponse.customer_info.delivery_address ?? null,
-      subtotal,
-      total,
-      currency,
-      notes: geminiResponse.reasoning,
-      ai_confidence: geminiResponse.confidence,
-      ai_extracted: true,
-      source_message_id: messageId,
-    })
-    .select("id")
-    .single();
-
-  if (orderError || !order) {
-    throw new Error(
-      `Failed to create order: ${orderError?.message ?? "unknown error"}`
-    );
-  }
-
-  // Insert order items
-  await insertOrderItems(supabase, {
-    merchantId,
-    orderId: order.id,
-    conversationId,
-    messageId,
-    validatedItems,
-  });
-
-  // Insert timeline entry — to_status must match the status the order was
-  // minted in so the timeline reads truthfully.
-  const confidencePct = (geminiResponse.confidence * 100).toFixed(0);
-  const timelineNote =
-    status === "ai_proposal"
-      ? `AI proposal awaiting merchant review (confidence: ${confidencePct}%)`
-      : `AI-extracted order (confidence: ${confidencePct}%)`;
-  const { error: timelineError } = await supabase
-    .from("order_timeline")
-    .insert({
-      merchant_id: merchantId,
-      order_id: order.id,
-      from_status: null,
-      to_status: status,
-      changed_by: "ai",
-      note: timelineNote,
-    });
-
-  if (timelineError) {
-    console.error("[AI Pipeline] Failed to insert timeline:", timelineError);
-  }
-
-  return { orderId: order.id, orderNumber, diagnostics };
 }
 
 // ============================================================
@@ -197,8 +63,8 @@ interface UpsertCollectingParams {
  * is updated in place — its order_items are fully replaced (delete + re-insert)
  * and its delivery_address / notes / totals / ai_collection_state overwritten
  * with the full running order (the Gemini contract re-emits the complete order
- * every turn). Returns the order id + number + validation diagnostics, mirroring
- * createOrderFromAI so callers surface the same flags.
+ * every turn). Returns the order id + number + validation diagnostics so
+ * callers can surface the same flags.
  */
 export async function upsertCollectingOrder(
   supabase: SupabaseClient,
@@ -484,10 +350,10 @@ export async function cancelCollectingOrder(
 }
 
 /**
- * Map validated items into order_items rows and insert them. Shared by
- * createOrderFromAI and upsertCollectingOrder. A live order with zero items is a
- * silent data-loss failure, so an insert error is surfaced as a merchant flag,
- * not just logged. No-op when there are no items.
+ * Map validated items into order_items rows and insert them. A live order
+ * with zero items is a silent data-loss failure, so an insert error is
+ * surfaced as a merchant flag, not just logged. No-op when there are no
+ * items.
  */
 async function insertOrderItems(
   supabase: SupabaseClient,

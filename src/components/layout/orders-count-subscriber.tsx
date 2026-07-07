@@ -14,20 +14,13 @@ export function OrdersCountSubscriber({ merchantId }: { merchantId: string }) {
   const prevCountRef = useRef(0);
 
   const refetch = useCallback(async () => {
-    const [incomingResponse, pendingResponse] = await Promise.all([
-      fetch("/api/orders?status=incoming&limit=500"),
-      fetch("/api/orders?status=pending&limit=500"),
-    ]);
+    const incomingResponse = await fetch("/api/orders?status=incoming&limit=500");
 
     const incomingData = incomingResponse.ok
       ? ((await incomingResponse.json()) as { orders?: OrderWithCustomer[] })
       : { orders: [] };
-    const pendingData = pendingResponse.ok
-      ? ((await pendingResponse.json()) as { orders?: OrderWithCustomer[] })
-      : { orders: [] };
 
-    const count =
-      (incomingData.orders?.length ?? 0) + (pendingData.orders?.length ?? 0);
+    const count = incomingData.orders?.length ?? 0;
 
     if (!hasLoadedRef.current) {
       hasLoadedRef.current = true;

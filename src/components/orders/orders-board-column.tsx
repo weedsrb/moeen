@@ -15,6 +15,7 @@ interface OrdersBoardColumnProps {
   orders: OrderWithCustomer[];
   errorOrderId: string | null;
   errorMessage: string | null;
+  onStatusChange: (orderId: string, status: OrderStatus) => Promise<void>;
 }
 
 export function OrdersBoardColumn({
@@ -22,6 +23,7 @@ export function OrdersBoardColumn({
   orders,
   errorOrderId,
   errorMessage,
+  onStatusChange,
 }: OrdersBoardColumnProps) {
   const { setNodeRef, isOver } = useDroppable({
     id: `column-${status}`,
@@ -50,7 +52,7 @@ export function OrdersBoardColumn({
         <div className="flex flex-1 flex-col gap-3">
           {orders.map((order) => (
             <div key={order.id} className="space-y-1">
-              <SortableOrderCard order={order} />
+              <SortableOrderCard order={order} onStatusChange={onStatusChange} />
               {errorOrderId === order.id && errorMessage && (
                 <p className="px-1 text-xs text-destructive">{errorMessage}</p>
               )}

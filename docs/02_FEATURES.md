@@ -160,8 +160,8 @@ Mo'een has 6 pages plus an onboarding flow:
 **Purpose:** Full order lifecycle management. The merchant sees every order, its status, and can act on it.
 
 **Main View: Order Board**
-- Kanban-style columns OR list view (merchant can toggle)
-- Columns: Incoming → Pending → Confirmed → Out for Delivery → Delivered
+- Two tabs: **Active** (Kanban-style columns OR list view, merchant can toggle) and **History** (delivered + cancelled orders, paginated list)
+- Active columns: Collecting → Incoming → Confirmed → Out for Delivery. `Delivered` and `Cancelled` orders don't stay on the live board/list — they move to the History tab so the working view only ever shows orders still in motion
 - Each column header shows count
 - Each order card shows:
   - Lifecycle color indicator (left border or badge)
@@ -193,16 +193,23 @@ Mo'een has 6 pages plus an onboarding flow:
 - Button: "Create Order" → form with customer search, product selection, quantities
 - For when AI misses an order or merchant takes an order by phone
 
-**Order Lifecycle:**
+**Order Lifecycle (6 statuses, order lifecycle v2):**
 
 | Status | Trigger | Inventory Effect | Customer Notification |
 |--------|---------|-----------------|----------------------|
-| **Incoming** | AI detects order intent | None | None |
-| **Pending** | Customer confirms details OR merchant reviews | Inventory reserved | None |
-| **Confirmed** | Merchant clicks Confirm | Inventory deducted | "Your order is confirmed!" |
+| **Collecting** | AI is still gathering order details across turns | None | (conversational replies) |
+| **Incoming** | Customer confirms the order OR merchant creates one manually | Inventory reserved | None |
+| **Confirmed** | Merchant clicks Confirm | Inventory deducted, reservation cleared | "Your order is confirmed!" |
 | **Out for Delivery** | Merchant clicks Dispatch | None | "Your order is on its way!" |
-| **Delivered** | Merchant clicks Delivered | None | "Your order has been delivered!" (optional feedback prompt) |
+| **Delivered** | Merchant clicks Delivered | None | "Your order has been delivered!" (optional feedback prompt) — moves to History |
+| **Cancelled** | Merchant or AI cancels | Restores stock if it had been deducted/reserved | — moves to History |
 | **Flagged** | AI low confidence, timeout, stock issue, or manual | Depends on stage | "A team member will assist you shortly" |
+
+A merchant-side "Pending" step and the AI's below-threshold "AI Proposal" status
+were both retired: the finalize gate already requires explicit customer
+confirmation before an order reaches `Incoming`, so a separate "awaiting
+confirmation" step was redundant, and `ai_proposal` had been dead code since
+the conversational-ordering redesign (see `07_AI_PIPELINE.md`).
 
 **Technical notes:**
 - Supabase Realtime: new orders appear live
@@ -233,7 +240,7 @@ Mo'een has 6 pages plus an onboarding flow:
   - Description
   - Price
   - Variants (if any — size, color)
-  - Quantity: total, reserved (in pending orders), available
+  - Quantity: total, reserved (by `incoming` orders), available
   - Low stock threshold (configurable per product)
 - Edit all fields inline
 - Stock adjustment: manual +/- with reason logging

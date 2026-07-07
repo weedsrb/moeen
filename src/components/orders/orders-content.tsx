@@ -9,12 +9,16 @@ import {
 } from "@/components/layout/orders-count-provider";
 import { ORDER_STATUS_LABELS, canTransition } from "@/types/order";
 import type { Order, OrderStatus, OrderWithCustomer } from "@/types/order";
-
-// Statuses counted by the sidebar Orders badge (mirror OrdersCountSubscriber).
-const BADGE_STATUSES: OrderStatus[] = ["incoming", "pending"];
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
 import { OrdersToolbar } from "./orders-toolbar";
 import { OrdersBoard } from "./orders-board";
 import { OrdersList } from "./orders-list";
+import { OrderHistory } from "./order-history";
 
 interface OrdersContentProps {
   initialOrders: OrderWithCustomer[];
@@ -43,6 +47,7 @@ export function OrdersContent({ initialOrders, merchantId }: OrdersContentProps)
   const ordersCount = useOrdersCount();
   const setOrdersCount = useOrdersCountSetter();
   const [orders, setOrders] = useState<OrderWithCustomer[]>(initialOrders);
+  const [activeTab, setActiveTab] = useState<"active" | "history">("active");
   const [view, setView] = useState<"board" | "list">("board");
   const [statusFilter, setStatusFilter] = useState<OrderStatus | "all">(() =>
     parseStatus(searchParams.get("status"))
@@ -110,8 +115,8 @@ export function OrdersContent({ initialOrders, merchantId }: OrdersContentProps)
     // Optimistically adjust the sidebar Orders badge the instant the status
     // changes (e.g. confirming an order removes it from the count). Realtime
     // reconciles once the PATCH lands.
-    const wasCounted = BADGE_STATUSES.includes(order.status);
-    const willCount = BADGE_STATUSES.includes(toStatus);
+    const wasCounted = order.status === "incoming";
+    const willCount = toStatus === "incoming";
     if (wasCounted && !willCount) {
       setOrdersCount(Math.max(0, ordersCount - 1));
     } else if (!wasCounted && willCount) {
@@ -142,33 +147,55 @@ export function OrdersContent({ initialOrders, merchantId }: OrdersContentProps)
     <div className="flex min-h-0 flex-1 flex-col gap-4">
       <div className="flex shrink-0 items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold">Orders</h1>
-        <p className="font-mono text-sm text-muted-foreground">
-          {filteredOrders.length}
-        </p>
-      </div>
-
-      <OrdersToolbar
-        search={search}
-        onSearchChange={setSearch}
-        statusFilter={statusFilter}
-        onStatusFilterChange={setStatusFilter}
-        dateRange={dateRange}
-        onDateRangeChange={setDateRange}
-        view={view}
-        onViewChange={setView}
-        isCreateOpen={isCreateOpen}
-        onCreateOpenChange={setIsCreateOpen}
-      />
-
-      <div className="min-h-0 flex-1 overflow-hidden">
-        {view === "board" ? (
-          <OrdersBoard orders={filteredOrders} onStatusChange={handleStatusChange} />
-        ) : (
-          <div className="h-full overflow-auto">
-            <OrdersList orders={filteredOrders} />
-          </div>
+        {activeTab === "active" && (
+          <p className="font-mono text-sm text-muted-foreground">
+            {filteredOrders.length}
+          </p>
         )}
       </div>
+
+      <Tabs
+        value={activeTab}
+        onValueChange={(v) => v && setActiveTab(v as "active" | "history")}
+        className="flex min-h-0 flex-1 flex-col gap-4"
+      >
+        <TabsList className="w-fit">
+          <TabsTrigger value="active">Active</TabsTrigger>
+          <TabsTrigger value="history">History</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="active" className="flex min-h-0 flex-1 flex-col gap-4">
+          <OrdersToolbar
+            search={search}
+            onSearchChange={setSearch}
+            statusFilter={statusFilter}
+            onStatusFilterChange={setStatusFilter}
+            dateRange={dateRange}
+            onDateRangeChange={setDateRange}
+            view={view}
+            onViewChange={setView}
+            isCreateOpen={isCreateOpen}
+            onCreateOpenChange={setIsCreateOpen}
+          />
+
+          <div className="min-h-0 flex-1 overflow-hidden">
+            {view === "board" ? (
+              <OrdersBoard orders={filteredOrders} onStatusChange={handleStatusChange} />
+            ) : (
+              <div className="h-full overflow-auto">
+                <OrdersList
+                  orders={filteredOrders}
+                  onStatusChange={handleStatusChange}
+                />
+              </div>
+            )}
+          </div>
+        </TabsContent>
+
+        <TabsContent value="history" className="flex min-h-0 flex-1 flex-col">
+          <OrderHistory />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
