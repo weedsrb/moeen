@@ -12,6 +12,7 @@ export interface Message {
   content: string;
   message_type: MessageType;
   media_url: string | null;
+  reply_to_message_id: string | null;
   has_order_signal: boolean;
   ai_processed: boolean;
   ai_result: Record<string, unknown> | null;

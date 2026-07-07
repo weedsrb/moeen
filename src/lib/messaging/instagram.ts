@@ -2,6 +2,7 @@ import type {
   MessagingProvider,
   MessageResult,
   ParsedMessage,
+  SendMessageOptions,
 } from "./interface";
 import type {
   InstagramWebhookPayload,
@@ -12,6 +13,9 @@ import type {
   InstagramShortLivedTokenResponse,
   InstagramLongLivedTokenResponse,
   InstagramProfile,
+  InstagramConversationSummary,
+  InstagramConversationParticipant,
+  InstagramHistoryMessage,
 } from "@/types/instagram";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { MESSAGE_COLUMNS } from "@/lib/db/columns";
@@ -23,11 +27,6 @@ const GRAPH_API_BASE = `https://graph.instagram.com/${GRAPH_API_VERSION}`;
 const OAUTH_TOKEN_URL = "https://api.instagram.com/oauth/access_token";
 const LONG_LIVED_TOKEN_URL = `https://graph.instagram.com/access_token`;
 const REFRESH_TOKEN_URL = `https://graph.instagram.com/refresh_access_token`;
-
-export interface SendOptions {
-  /** Merchant (human) sends may extend the window to 7 days via the HUMAN_AGENT tag. AI sends must NOT. */
-  humanAgentTag?: boolean;
-}
 
 /**
  * Returns true when a send failed because the 24-hour standard messaging
@@ -58,12 +57,27 @@ export class InstagramProvider implements MessagingProvider {
   async sendMessage(
     chatId: string,
     text: string,
-    options: SendOptions = {}
+    options: SendMessageOptions = {}
   ): Promise<MessageResult> {
+    // Instagram cannot combine text + attachment in one send — an image send
+    // carries only the attachment; any caption is sent as a separate message
+    // by the caller.
+    const message: Record<string, unknown> = options.imageUrl
+      ? {
+          attachment: {
+            type: "image",
+            payload: { url: options.imageUrl, is_reusable: false },
+          },
+        }
+      : { text };
+
     const body: Record<string, unknown> = {
       recipient: { id: chatId },
-      message: { text },
+      message,
     };
+    if (options.replyToMid) {
+      body.reply_to = { mid: options.replyToMid };
+    }
     if (options.humanAgentTag) {
       body.messaging_type = "MESSAGE_TAG";
       body.tag = "HUMAN_AGENT";
@@ -126,7 +140,10 @@ export class InstagramProvider implements MessagingProvider {
           messageType = "text";
       }
       mediaUrl = attachment.payload?.url;
-      if (!text) text = `[${attachment.type}]`;
+      // Placeholder from the *mapped* type (voice/image/document), not the raw
+      // Instagram attachment kind — so the chat UI's `[${message_type}]`
+      // placeholder guard matches and doesn't render it as a caption.
+      if (!text) text = `[${messageType}]`;
     }
 
     return {
@@ -137,6 +154,7 @@ export class InstagramProvider implements MessagingProvider {
       text,
       messageType,
       mediaUrl,
+      replyToPlatformMessageId: msg.reply_to?.mid,
       timestamp: new Date(event.timestamp),
     };
   }
@@ -208,6 +226,86 @@ export class InstagramProvider implements MessagingProvider {
       name: data.name,
       profile_pic: data.profile_pic,
     };
+  }
+
+  // --- Conversation history (backfill) ---
+  // These read past DMs to seed Mo'een with conversations that predate the
+  // connection. Meta caps message detail at the ~20 most recent per thread.
+
+  /**
+   * List every conversation on the connected account, newest-activity first.
+   * Follows `paging.next` up to `maxConversations` (default 100) so a large
+   * inbox doesn't run unbounded.
+   */
+  static async listConversations(
+    accessToken: string,
+    maxConversations = 100
+  ): Promise<InstagramConversationSummary[]> {
+    // Keep participant subfields to the reliably-supported id+username; name and
+    // avatar are backfilled per-customer via resolveProfile during import.
+    const fields = "id,updated_time,participants{id,username}";
+    let url:
+      | string
+      | null = `${GRAPH_API_BASE}/me/conversations?platform=instagram&fields=${fields}&limit=50&access_token=${accessToken}`;
+
+    const conversations: InstagramConversationSummary[] = [];
+
+    while (url && conversations.length < maxConversations) {
+      const res = await fetch(url);
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`Instagram conversations fetch failed: ${err}`);
+      }
+      const data = (await res.json()) as {
+        data?: Array<{
+          id: string;
+          updated_time?: string;
+          participants?: { data?: InstagramConversationParticipant[] };
+        }>;
+        paging?: { next?: string };
+      };
+
+      for (const c of data.data ?? []) {
+        conversations.push({
+          id: c.id,
+          updatedTime: c.updated_time ?? null,
+          participants: c.participants?.data ?? [],
+        });
+      }
+
+      url = data.paging?.next ?? null;
+    }
+
+    return conversations.slice(0, maxConversations);
+  }
+
+  /**
+   * Fetch the (up to 20) most recent messages in a conversation, oldest first.
+   * Meta returns only the last ~20; anything older reports as deleted, so this
+   * is the deepest backfill the API allows.
+   */
+  static async fetchConversationMessages(
+    conversationId: string,
+    accessToken: string
+  ): Promise<InstagramHistoryMessage[]> {
+    const fields =
+      "messages.limit(20){id,created_time,from,to,message,shares,story}";
+    const res = await fetch(
+      `${GRAPH_API_BASE}/${conversationId}?fields=${fields}&access_token=${accessToken}`
+    );
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Instagram messages fetch failed: ${err}`);
+    }
+    const data = (await res.json()) as {
+      messages?: { data?: InstagramHistoryMessage[] };
+    };
+    const messages = data.messages?.data ?? [];
+    // The API returns newest-first; import in chronological order.
+    return [...messages].sort(
+      (a, b) =>
+        new Date(a.created_time).getTime() - new Date(b.created_time).getTime()
+    );
   }
 
   /** Fetch the connected account's own IG user id + username using its token. */

@@ -1,7 +1,8 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { getUserCached, getMerchantCached } from "@/lib/auth/require-merchant";
 import { InstagramProvider } from "@/lib/messaging/instagram";
+import { importInstagramHistory } from "@/lib/messaging/import-history";
 
 /**
  * GET /api/auth/instagram/callback
@@ -91,6 +92,19 @@ export async function GET(request: NextRequest) {
       .eq("merchant_id", merchant.id);
 
     if (updateError) return fail("save_failed");
+
+    // Backfill existing DM history in the background so conversations that
+    // predate the connection show up immediately. Fire-and-forget — the OAuth
+    // redirect must not wait on it.
+    after(() =>
+      importInstagramHistory({
+        merchantId: merchant.id,
+        igUserId: self.user_id,
+        accessToken: longLived.access_token,
+      }).catch((err) =>
+        console.error("[Instagram OAuth] history backfill failed:", err)
+      )
+    );
 
     settingsUrl.searchParams.set("ig_connected", "1");
     const res = NextResponse.redirect(settingsUrl);

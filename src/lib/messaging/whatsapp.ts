@@ -2,6 +2,7 @@ import type {
   MessagingProvider,
   MessageResult,
   ParsedMessage,
+  SendMessageOptions,
 } from "./interface";
 import type {
   WhatsAppWebhookPayload,
@@ -24,7 +25,14 @@ export class WhatsAppProvider implements MessagingProvider {
     this.accessToken = accessToken;
   }
 
-  async sendMessage(chatId: string, text: string): Promise<MessageResult> {
+  async sendMessage(
+    chatId: string,
+    text: string,
+    // Dormant provider: image/reply options are accepted for interface
+    // compatibility but not implemented.
+    _options: SendMessageOptions = {}
+  ): Promise<MessageResult> {
+    void _options;
     const res = await fetch(
       `${GRAPH_API_BASE}/${this.phoneNumberId}/messages`,
       {

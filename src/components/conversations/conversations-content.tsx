@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useMemo } from "react";
 import dynamic from "next/dynamic";
 import { useRealtimeConversations } from "@/hooks/use-realtime-conversations";
 import {
@@ -11,11 +11,15 @@ import {
   ConversationList,
   type ConversationWithCustomer,
 } from "./conversation-list";
+import {
+  ConversationsFilterBar,
+  type ConversationFilters,
+} from "./conversations-filter-bar";
 import type { ChatSendRef } from "@/components/chat/chat-thread";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { Conversation } from "@/types/message";
+import type { Conversation, Message } from "@/types/message";
 
 const ChatThread = dynamic(
   () => import("@/components/chat/chat-thread").then((m) => m.ChatThread),
@@ -39,9 +43,53 @@ export function ConversationsContent({
     useState<ConversationWithCustomer[]>(initialConversations);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mobileShowChat, setMobileShowChat] = useState(false);
+  const [replyTarget, setReplyTarget] = useState<Message | null>(null);
+  const [filters, setFilters] = useState<ConversationFilters>({
+    search: "",
+    status: "all",
+    from: "",
+    to: "",
+  });
 
   const sendRef = useRef<ChatSendRef | null>(null);
   const selected = conversations.find((c) => c.id === selectedId) ?? null;
+
+  // Clear the reply target when switching conversations (render-phase reset).
+  const [prevSelectedId, setPrevSelectedId] = useState(selectedId);
+  if (selectedId !== prevSelectedId) {
+    setPrevSelectedId(selectedId);
+    setReplyTarget(null);
+  }
+
+  const filteredConversations = useMemo(() => {
+    const q = filters.search.trim().toLowerCase();
+    const fromMs = filters.from ? new Date(filters.from).getTime() : null;
+    const toMs = filters.to ? new Date(`${filters.to}T23:59:59`).getTime() : null;
+
+    return conversations.filter((c) => {
+      if (q) {
+        const customer = c.customers;
+        const hit =
+          (customer?.name?.toLowerCase().includes(q) ?? false) ||
+          (customer?.platform_user_id?.toLowerCase().includes(q) ?? false) ||
+          (customer?.phone?.toLowerCase().includes(q) ?? false);
+        if (!hit) return false;
+      }
+
+      if (fromMs !== null || toMs !== null) {
+        const t = c.last_message_at ? new Date(c.last_message_at).getTime() : 0;
+        if (fromMs !== null && t < fromMs) return false;
+        if (toMs !== null && t > toMs) return false;
+      }
+
+      if (filters.status !== "all") {
+        const statuses = c.orders?.map((o) => o.status) ?? [];
+        if (!statuses.includes(filters.status)) return false;
+      }
+
+      return true;
+    });
+  }, [conversations, filters]);
 
   const unreadTotal = useUnreadCount();
   const setUnreadTotal = useUnreadCountSetter();
@@ -95,6 +143,19 @@ export function ConversationsContent({
     setMobileShowChat(false);
   }
 
+  function handleMarkUnread(conversation: ConversationWithCustomer) {
+    setConversations((prev) =>
+      prev.map((c) => (c.id === conversation.id ? { ...c, unread_count: 1 } : c))
+    );
+    setUnreadTotal(unreadTotal + 1);
+
+    fetch(`/api/conversations/${conversation.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ unread_count: 1 }),
+    }).catch(() => {});
+  }
+
   const customerName = selected?.customers?.name ?? "Unknown";
   const customerAvatar = selected?.customers?.avatar_url ?? null;
 
@@ -107,11 +168,17 @@ export function ConversationsContent({
           mobileShowChat ? "hidden sm:block" : "block"
         )}
       >
-        <ConversationList
-          conversations={conversations}
-          selectedId={selectedId}
-          onSelect={handleSelect}
-        />
+        <div className="flex h-full flex-col">
+          <ConversationsFilterBar value={filters} onChange={setFilters} />
+          <div className="min-h-0 flex-1">
+            <ConversationList
+              conversations={filteredConversations}
+              selectedId={selectedId}
+              onSelect={handleSelect}
+              onMarkUnread={handleMarkUnread}
+            />
+          </div>
+        </div>
       </div>
 
       {/* Chat Panel — right panel */}
@@ -165,10 +232,19 @@ export function ConversationsContent({
             </div>
 
             {/* Messages */}
-            <ChatThread conversationId={selected.id} onSendRef={sendRef} />
+            <ChatThread
+              conversationId={selected.id}
+              onSendRef={sendRef}
+              onReply={setReplyTarget}
+            />
 
             {/* Reply */}
-            <ReplyInput conversationId={selected.id} onSendRef={sendRef} />
+            <ReplyInput
+              conversationId={selected.id}
+              onSendRef={sendRef}
+              replyTarget={replyTarget}
+              onClearReply={() => setReplyTarget(null)}
+            />
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center">

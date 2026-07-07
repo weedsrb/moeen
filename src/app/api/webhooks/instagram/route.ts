@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { InstagramProvider } from "@/lib/messaging/instagram";
+import {
+  rehostInstagramImage,
+  rehostInstagramAudio,
+} from "@/lib/messaging/rehost-media";
 import { processInboundMessage } from "@/lib/ai/process";
 import type { InstagramWebhookPayload } from "@/types/instagram";
 
@@ -168,6 +172,31 @@ export async function POST(request: NextRequest) {
           conversationId = newConvo.id;
         }
 
+        // Re-host inbound media: Instagram's attachment URLs are time-limited
+        // CDN links that expire, so persist the bytes in our own storage. Done
+        // inline (not in after()) so the single INSERT — and the realtime event
+        // the client receives — already carries the durable URL. Images and
+        // voice notes are re-hosted; other media keep their raw URL (chips).
+        let mediaUrl = parsed.mediaUrl ?? null;
+        if (mediaUrl && parsed.messageType === "image") {
+          mediaUrl = await rehostInstagramImage(mediaUrl, merchantId);
+        } else if (mediaUrl && parsed.messageType === "voice") {
+          mediaUrl = await rehostInstagramAudio(mediaUrl, merchantId);
+        }
+
+        // Resolve reply context: map the replied-to platform mid back to our
+        // stored message so the UI can render a quoted block.
+        let replyToMessageId: string | null = null;
+        if (parsed.replyToPlatformMessageId) {
+          const { data: parent } = await supabase
+            .from("messages")
+            .select("id")
+            .eq("conversation_id", conversationId)
+            .eq("platform_message_id", parsed.replyToPlatformMessageId)
+            .maybeSingle();
+          replyToMessageId = parent?.id ?? null;
+        }
+
         // Save inbound message
         const { data: savedMessage } = await supabase
           .from("messages")
@@ -179,7 +208,8 @@ export async function POST(request: NextRequest) {
             sender_type: "customer",
             content: parsed.text || `[${parsed.messageType}]`,
             message_type: parsed.messageType,
-            media_url: parsed.mediaUrl ?? null,
+            media_url: mediaUrl,
+            reply_to_message_id: replyToMessageId,
             has_order_signal: false,
             ai_processed: false,
           })
