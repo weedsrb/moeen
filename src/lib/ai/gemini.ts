@@ -148,7 +148,7 @@ const RESPONSE_SCHEMA_INSTRUCTIONS = `Respond ONLY with valid JSON matching this
  * data substitution anywhere — so neither `$`-patterns nor stray
  * `{placeholder}` tokens inside data can corrupt the prompt.
  */
-function buildPrompt(params: {
+export function buildPrompt(params: {
   currency: string;
   merchantContext: string;
   catalog: CompressedProduct[];
