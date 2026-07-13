@@ -1,6 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { SenderType } from "@/types/message";
 import type { AssembledContext, CompressedProduct } from "./types";
+import type { CollectionState } from "./order-creator";
+import { canAcceptConfirmation } from "./confirmation";
 
 /**
  * assembleContext's return type, augmented with the conversation's open
@@ -19,6 +21,10 @@ export interface AssembledContextWithOrder extends AssembledContext {
   /** The open `collecting` order's id, or null — so the pipeline can upsert /
    *  promote it without re-querying. */
   collectingOrderId: string | null;
+  /** Persisted working state for confirmation and customer-detail continuity. */
+  collectionState: CollectionState | null;
+  /** True only when a persisted pending readback is the latest AI outbound. */
+  canAcceptConfirmation: boolean;
 }
 
 /** Shape of the open collecting order row (untyped client → cast locally). */
@@ -28,8 +34,10 @@ interface CollectingOrderRow {
   subtotal: number | null;
   total: number | null;
   currency: string | null;
+  ai_collection_state: CollectionState | null;
   order_items:
     | Array<{
+        product_id: string | null;
         product_name: string;
         variant: string | null;
         quantity: number;
@@ -52,7 +60,9 @@ export async function assembleContext(
   supabase: SupabaseClient,
   merchantId: string,
   conversationId: string,
-  messageContent: string
+  customerId: string,
+  messageContent: string,
+  excludeMessageIds: string[] = []
 ): Promise<AssembledContextWithOrder> {
   // Fetch in parallel: messages, products, settings, business name, FAQ, and
   // the single open collecting order (+ its items) for this conversation.
@@ -63,13 +73,14 @@ export async function assembleContext(
     merchantResult,
     faqResult,
     collectingResult,
+    customerResult,
   ] = await Promise.all([
       supabase
         .from("messages")
-        .select("content, direction, sender_type")
+        .select("id, content, direction, sender_type")
         .eq("conversation_id", conversationId)
         .order("created_at", { ascending: false })
-        .limit(6),
+        .limit(12),
 
       supabase
         .from("products")
@@ -100,7 +111,7 @@ export async function assembleContext(
       supabase
         .from("orders")
         .select(
-          "id, delivery_address, subtotal, total, currency, order_items(product_name, variant, quantity, unit_price, subtotal)"
+          "id, delivery_address, subtotal, total, currency, ai_collection_state, order_items(product_id, product_name, variant, quantity, unit_price, subtotal)"
         )
         .eq("merchant_id", merchantId)
         .eq("conversation_id", conversationId)
@@ -108,10 +119,37 @@ export async function assembleContext(
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle(),
+
+      supabase
+        .from("customers")
+        .select("name, phone, delivery_address")
+        .eq("id", customerId)
+        .eq("merchant_id", merchantId)
+        .single(),
     ]);
 
+  const failures = [
+    ["messages", messagesResult.error],
+    ["products", productsResult.error],
+    ["settings", settingsResult.error],
+    ["merchant", merchantResult.error],
+    ["faq", faqResult.error],
+    ["collecting_order", collectingResult.error],
+    ["customer", customerResult.error],
+  ].filter((entry) => entry[1]);
+  if (failures.length > 0) {
+    const detail = failures
+      .map(([source, error]) => `${source}: ${(error as { message: string }).message}`)
+      .join("; ");
+    throw new Error(`AI context unavailable (${detail})`);
+  }
+
   // --- Conversation history ---
-  const messages = (messagesResult.data ?? []).reverse(); // oldest first
+  const excludedIds = new Set(excludeMessageIds);
+  const messages = (messagesResult.data ?? [])
+    .filter((message) => !excludedIds.has(message.id))
+    .reverse()
+    .slice(-6); // oldest first, current burst excluded
   const conversationHistory = messages
     .map((msg) => {
       const label = senderLabel(msg.sender_type as SenderType, msg.direction as string);
@@ -129,6 +167,14 @@ export async function assembleContext(
   const rawProducts = productsResult.data ?? [];
   let products = rawProducts;
 
+  const collectingOrder =
+    (collectingResult.data as CollectingOrderRow | null) ?? null;
+  const openProductIds = new Set(
+    (collectingOrder?.order_items ?? [])
+      .map((item) => item.product_id)
+      .filter((id): id is string => Boolean(id))
+  );
+
   // If catalog is large, filter to products matching message words. Both the
   // message tokens and the product name/alt-names are run through
   // normalizeForMatch first, so Arabic diacritics, alef/hamza/yaa/taa-marbuta
@@ -145,11 +191,14 @@ export async function assembleContext(
         productTokens.some((pt) => tokensMatch(mt, pt))
       );
     });
-    // Cap matches; fall back to a bounded slice if the filter found nothing.
-    products =
-      matched.length > 0
-        ? matched.slice(0, MAX_FILTERED_PRODUCTS)
-        : rawProducts.slice(0, MAX_FILTERED_PRODUCTS);
+    // Products already present in the open order are mandatory context even
+    // when the latest message is only "yes", an address, or another detail.
+    const mandatory = rawProducts.filter((p) => openProductIds.has(p.id));
+    const candidates = matched.length > 0 ? matched : rawProducts;
+    const unique = new Map(
+      [...mandatory, ...candidates].map((product) => [product.id, product])
+    );
+    products = [...unique.values()].slice(0, MAX_FILTERED_PRODUCTS);
   }
 
   const catalog: CompressedProduct[] = products.map((p) => ({
@@ -186,11 +235,25 @@ export async function assembleContext(
   const faq = faqResult.data ?? [];
   const merchantContext = buildMerchantContext(businessName, settings, faq);
 
+  const customerProfile = {
+    name: customerResult.data?.name ?? null,
+    phone: customerResult.data?.phone ?? null,
+    deliveryAddress: customerResult.data?.delivery_address ?? null,
+  };
+  const customerContext = [
+    `Name: ${customerProfile.name ?? "(unknown)"}`,
+    `Phone: ${customerProfile.phone ?? "(unknown)"}`,
+    `Known delivery address: ${customerProfile.deliveryAddress ?? "(unknown)"}`,
+  ].join("\n");
+
   // --- Open collecting order (the running "order so far") ---
-  const collectingOrder =
-    (collectingResult.data as CollectingOrderRow | null) ?? null;
   const collectingOrderId = collectingOrder?.id ?? null;
   const hasOpenCollectingOrder = collectingOrderId !== null;
+  const collectionState = collectingOrder?.ai_collection_state ?? null;
+  const confirmationAllowed = canAcceptConfirmation(collectionState, {
+    senderType: (lastOutbound?.sender_type as SenderType) ?? null,
+    content: lastOutbound?.content ?? null,
+  });
   const orderSoFar = collectingOrder
     ? renderOrderSoFar(collectingOrder, currency)
     : "(no order yet)";
@@ -198,12 +261,16 @@ export async function assembleContext(
   return {
     conversationHistory,
     catalog,
+    customerContext,
+    customerProfile,
     settings,
     merchantContext,
     lastOutboundSenderType,
     orderSoFar,
     hasOpenCollectingOrder,
     collectingOrderId,
+    collectionState,
+    canAcceptConfirmation: confirmationAllowed,
   };
 }
 

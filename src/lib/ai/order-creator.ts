@@ -38,6 +38,12 @@ export interface CollectionState {
   awaiting_confirmation: boolean;
   /** The last readback message shown to the customer, if any. */
   last_readback: string | null;
+  /** Grounded customer details retained while the order is still collecting. */
+  customer_info?: {
+    name: string | null;
+    phone: string | null;
+    delivery_address: string | null;
+  };
 }
 
 interface UpsertCollectingParams {
@@ -92,6 +98,11 @@ export async function upsertCollectingOrder(
     missing_fields: collectionState.missing_fields,
     awaiting_confirmation: collectionState.awaiting_confirmation,
     last_readback: collectionState.last_readback,
+    customer_info: collectionState.customer_info ?? {
+      name: geminiResponse.customer_info.name ?? null,
+      phone: geminiResponse.customer_info.phone ?? null,
+      delivery_address: deliveryAddress,
+    },
   };
 
   // --- Update path: overwrite the existing open draft ---
