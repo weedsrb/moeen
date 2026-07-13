@@ -2,7 +2,9 @@
 
 import { useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
-import { useMerchant } from "./merchant-provider";
+import { useMerchant, useOwnedMerchants } from "./merchant-provider";
+import { switchActiveMerchant } from "@/lib/auth/switch-merchant";
+import { signOut } from "@/lib/auth/sign-out";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,15 +20,19 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Bell, LogOut, Volume2, VolumeX } from "lucide-react";
+import { Bell, LogOut, PlusCircle, Search, Volume2, VolumeX } from "lucide-react";
+import { useCommandPalette } from "./command-palette-provider";
 
 export function TopBar() {
   const merchant = useMerchant();
+  const ownedMerchants = useOwnedMerchants();
   const router = useRouter();
+  const { setOpen: setCommandPaletteOpen } = useCommandPalette();
   const muted = useSyncExternalStore(
     subscribeMuted,
     getMutedSnapshot,
@@ -45,10 +51,12 @@ export function TopBar() {
     .toUpperCase();
 
   async function handleSignOut() {
-    await fetch("/api/auth/signout", { method: "POST" });
+    await signOut();
     router.push("/login");
     router.refresh();
   }
+
+  const otherMerchants = ownedMerchants.filter((m) => m.id !== merchant.id);
 
   return (
     <header className="flex items-center justify-between h-14 px-4 border-b border-border bg-card shrink-0">
@@ -61,6 +69,17 @@ export function TopBar() {
       </span>
 
       <div className="flex items-center gap-2">
+        {/* Global search / command palette trigger */}
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => setCommandPaletteOpen(true)}
+          title="Search (⌘K)"
+          aria-label="Open search"
+        >
+          <Search className="h-5 w-5" />
+        </Button>
+
         {/* Notification sound toggle */}
         <Button
           variant="ghost"
@@ -97,6 +116,26 @@ export function TopBar() {
                 <p className="text-xs text-muted-foreground">{merchant.email}</p>
               )}
             </div>
+            {otherMerchants.length > 0 && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuGroup>
+                  {otherMerchants.map((m) => (
+                    <DropdownMenuItem
+                      key={m.id}
+                      onClick={() => switchActiveMerchant(m.id)}
+                    >
+                      {m.businessName}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+              </>
+            )}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => router.push("/onboarding/new")}>
+              <PlusCircle className="me-2 h-4 w-4" />
+              Add another business
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <div className="flex items-center justify-between px-2 py-1.5">
               <span className="text-sm">Theme</span>

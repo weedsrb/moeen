@@ -21,9 +21,16 @@ import {
 interface ProductCardProps {
   product: Product;
   merchantThreshold?: number;
+  selected?: boolean;
+  onToggleSelect?: (id: string) => void;
 }
 
-export function ProductCard({ product, merchantThreshold }: ProductCardProps) {
+export function ProductCard({
+  product,
+  merchantThreshold,
+  selected = false,
+  onToggleSelect,
+}: ProductCardProps) {
   const status = getStockStatus(product, merchantThreshold);
   const available = getAvailableQuantity(product);
   const href = `/inventory/${product.id}`;
@@ -38,12 +45,31 @@ export function ProductCard({ product, merchantThreshold }: ProductCardProps) {
       <Card
         className={cn(
           "transition-colors hover:border-foreground/20 cursor-pointer",
-          getStockRowClass(status)
+          getStockRowClass(status),
+          selected && "ring-2 ring-primary"
         )}
       >
         <CardContent className="p-4 space-y-3">
           {/* Image */}
           <div className="relative aspect-square rounded-md bg-muted overflow-hidden flex items-center justify-center">
+            {onToggleSelect && (
+              <span
+                className="absolute top-2 start-2 z-10 flex"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onToggleSelect(product.id);
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={selected}
+                  readOnly
+                  aria-label={`Select ${product.name}`}
+                  className="h-4 w-4 cursor-pointer rounded accent-[var(--color-primary)]"
+                />
+              </span>
+            )}
             {product.image_url ? (
               <Image
                 src={product.image_url}

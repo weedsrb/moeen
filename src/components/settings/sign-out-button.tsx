@@ -2,13 +2,14 @@
 
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { signOut } from "@/lib/auth/sign-out";
 import { LogOut } from "lucide-react";
 
 export function SignOutButton() {
   const router = useRouter();
 
   async function handleSignOut() {
-    await fetch("/api/auth/signout", { method: "POST" });
+    await signOut();
     router.push("/login");
     router.refresh();
   }

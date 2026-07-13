@@ -4,17 +4,21 @@ import { createProductSchema } from "@/lib/validations/product";
 import { PRODUCT_COLUMNS } from "@/lib/db/columns";
 import { requireMerchantForApi } from "@/lib/auth/require-merchant";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   const auth = await requireMerchantForApi();
   if ("error" in auth) return auth.error;
 
   const supabase = await createClient();
 
+  // ?active=false returns archived (deactivated) products; default is active.
+  const isActive =
+    request.nextUrl.searchParams.get("active") === "false" ? false : true;
+
   const { data: products, error } = await supabase
     .from("products")
     .select(PRODUCT_COLUMNS)
     .eq("merchant_id", auth.merchant.id)
-    .eq("is_active", true)
+    .eq("is_active", isActive)
     .order("created_at", { ascending: false });
 
   if (error) {
