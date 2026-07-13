@@ -10,13 +10,7 @@ import {
   promoteCollectingToIncoming,
   cancelCollectingOrder,
 } from "./order-creator";
-import {
-  validateExtraction,
-  hasHardAvailabilityProblem,
-  isFinalizable,
-  getStockShortfalls,
-} from "./validate-extraction";
-import type { PipelineInput, GeminiResponse, OrderStage } from "./types";
+import type { AssistantTurnV1, PipelineInput } from "./types";
 import type {
   ValidationDiagnostics,
   StockShortfall,
@@ -26,11 +20,11 @@ import {
   enterHumanTakeover,
   isExplicitHumanRequest,
 } from "./human-takeover";
-import { resolveRequiredMissingFields } from "./order-policy";
 import {
   isRetryableAIProviderError,
   normalizeAIProviderError,
 } from "./provider";
+import { reduceAssistantTurn } from "./dialogue-state";
 
 /**
  * How long the pipeline waits before processing an inbound message, so a
@@ -392,11 +386,11 @@ export async function processInboundMessage(
     }
 
     // --- Step 3: Call the configured AI provider (with one transient retry) ---
-    let geminiResponse: GeminiResponse;
+    let assistantTurn: AssistantTurnV1;
     const callConversationModel = () => callGemini(context.aiRequest);
 
     try {
-      geminiResponse = await callConversationModel();
+      assistantTurn = await callConversationModel();
     } catch (firstError) {
       const normalizedFirstError = normalizeAIProviderError(firstError);
       console.error(`${tag} | ai_provider | FAILED (attempt 1):`, firstError);
@@ -436,7 +430,7 @@ export async function processInboundMessage(
       // Backoff with jitter so simultaneous webhooks do not retry in lockstep.
       await sleep(750 + Math.floor(Math.random() * 500));
       try {
-        geminiResponse = await callConversationModel();
+        assistantTurn = await callConversationModel();
       } catch (secondError) {
         const normalizedSecondError = normalizeAIProviderError(secondError);
         console.error(`${tag} | ai_provider | FAILED (attempt 2):`, secondError);
@@ -481,15 +475,23 @@ export async function processInboundMessage(
       await resetBreaker(supabase, merchantId);
     }
 
-    // --- Step 4: Save AI result to message ---
+    // --- Step 4: Reduce the untrusted proposal into deterministic state ---
+    const resolvedTurn = reduceAssistantTurn({
+      turn: assistantTurn,
+      request: context.aiRequest,
+      canAcceptConfirmation: context.canAcceptConfirmation,
+    });
+    const geminiResponse = resolvedTurn.extraction;
     console.log(
-      `${tag} | gemini | intent=${geminiResponse.intent}, stage=${geminiResponse.order_stage}, confidence=${(geminiResponse.confidence * 100).toFixed(0)}%, items=${geminiResponse.items.length}, missing=[${geminiResponse.missing_fields.join(",")}], needsHuman=${geminiResponse.needs_human}`
+      `${tag} | ai | intent=${assistantTurn.intent}, act=${assistantTurn.dialogue_act}, resolvedStage=${resolvedTurn.stage}, items=${geminiResponse.items.length}, missing=[${resolvedTurn.missingFields.join(",")}], needsHuman=${resolvedTurn.needsHuman}`
     );
-    if (geminiResponse.reasoning) {
-      console.log(`${tag} | gemini | reasoning: ${geminiResponse.reasoning.slice(0, 200)}`);
+    if (assistantTurn.uncertainty_codes.length > 0) {
+      console.log(
+        `${tag} | ai | uncertainty=${assistantTurn.uncertainty_codes.join(",")}`
+      );
     }
-    if (geminiResponse.reply_to_customer) {
-      console.log(`${tag} | gemini | reply_to_customer: ${geminiResponse.reply_to_customer.slice(0, 150)}`);
+    if (assistantTurn.reply) {
+      console.log(`${tag} | ai | reply: ${assistantTurn.reply.slice(0, 150)}`);
     }
 
     // ai_processed applies to the whole burst; ai_result (the extraction) is
@@ -500,16 +502,15 @@ export async function processInboundMessage(
       .in("id", burstIds);
     await supabase
       .from("messages")
-      .update({ ai_result: geminiResponse as Record<string, unknown> })
+      .update({ ai_result: assistantTurn as Record<string, unknown> })
       .eq("id", messageId);
 
     // --- Step 5: Conversational stage machine ---
-    // The model proposes a stage each turn; the pipeline resolves the REAL stage
-    // deterministically (never trusting the model to upgrade past what's valid),
-    // maintains the single open `collecting` draft, and sends exactly one reply.
+    // The model proposes language and a delta. The reducer owns stage, totals,
+    // missing fields, confirmation validity, and fact-reference validation.
     const { settings } = context;
-    const escalate = geminiResponse.needs_human === true;
-    const reply = geminiResponse.reply_to_customer;
+    const escalate = resolvedTurn.needsHuman;
+    const reply = assistantTurn.reply;
 
     /** Send one reply to the customer via the conversation channel (no-op on null). */
     const sendReply = async (
@@ -541,7 +542,7 @@ export async function processInboundMessage(
         messageId,
         inputHash,
         decisionCase: "intent_other",
-        geminiConfidence: geminiResponse.confidence,
+        geminiConfidence: null,
       });
       return;
     }
@@ -572,30 +573,21 @@ export async function processInboundMessage(
         messageId,
         inputHash,
         decisionCase: reply || escalate ? "question_answered" : "question_flagged",
-        geminiConfidence: geminiResponse.confidence,
+        geminiConfidence: null,
       });
       return;
     }
 
     // --- intent === "order": run the stage machine ---
-    const validation = validateExtraction(geminiResponse, context.catalog);
-    const effectiveMissingFields = resolveRequiredMissingFields({
-      modelMissingFields: geminiResponse.missing_fields,
-      requireCustomerName: context.settings.requireCustomerName,
-      requireCustomerPhone: context.settings.requireCustomerPhone,
-      customer: {
-        name: geminiResponse.customer_info.name ?? context.customerProfile.name,
-        phone:
-          geminiResponse.customer_info.phone ?? context.customerProfile.phone,
-        deliveryAddress:
-          geminiResponse.customer_info.delivery_address ??
-          context.customerProfile.deliveryAddress,
-      },
-    });
+    const validation = resolvedTurn.validation;
+    const effectiveMissingFields = resolvedTurn.missingFields;
     const hasMissing = effectiveMissingFields.length > 0;
-    const hardProblem = hasHardAvailabilityProblem(validation);
-    const stockShortfalls = getStockShortfalls(validation, context.catalog);
-    const finalizable = isFinalizable(validation, effectiveMissingFields);
+    const hardProblem =
+      validation.items.some((item) => item.product_id === null) ||
+      (validation.diagnostics.outOfStockItems?.length ?? 0) > 0 ||
+      (validation.diagnostics.invalidVariants?.length ?? 0) > 0;
+    const stockShortfalls = resolvedTurn.stockShortfalls;
+    const finalizable = resolvedTurn.finalizable;
     const diagnostics = validation.diagnostics;
     const replyLanguage = resolveReplyLanguage(
       context.settings.responseLanguage,
@@ -610,41 +602,32 @@ export async function processInboundMessage(
       proposed: geminiResponse.customer_info,
     });
 
-    // Resolve the real stage. Start from the model's, then FORCE it down: an
-    // order with a hard availability problem, a still-missing required field, or
-    // an active escalation can never be ready_to_confirm/confirmed — it keeps
-    // collecting. An order-intent "none" is treated as collecting.
-    let stage: OrderStage = geminiResponse.order_stage;
+    const stage = resolvedTurn.stage;
     let safeReply = reply;
-    let confirmationGuardTriggered = false;
-    if (stage === "none") stage = "collecting";
-    if (
-      stage !== "cancelled" &&
-      (hardProblem || hasMissing || escalate) &&
-      (stage === "ready_to_confirm" || stage === "confirmed")
-    ) {
-      stage = "collecting";
+    const confirmationGuardTriggered = resolvedTurn.confirmationRejected;
+    if (stage === "ready_to_confirm") {
+      safeReply = buildConfirmationReadback(
+        validation.items,
+        geminiResponse.customer_info.delivery_address ??
+          context.customerProfile.deliveryAddress,
+        validation.total,
+        context.settings.currency,
+        replyLanguage
+      );
+    } else if (stage === "collecting" && hasMissing) {
+      safeReply = buildMissingFieldQuestion(
+        effectiveMissingFields[0],
+        replyLanguage,
+        context.catalog
+      );
     }
-
-    if (stage === "confirmed" && !context.canAcceptConfirmation) {
-      confirmationGuardTriggered = true;
-      stage = finalizable ? "ready_to_confirm" : "collecting";
-      if (finalizable) {
-        safeReply = buildConfirmationReadback(
-          validation.items,
-          geminiResponse.customer_info.delivery_address ??
-            context.customerProfile.deliveryAddress,
-          validation.total,
-          context.settings.currency,
-          replyLanguage
-        );
-      }
+    if (confirmationGuardTriggered) {
       console.warn(
-        `${tag} | confirmation | rejected model confirmation without a persisted latest readback`
+        `${tag} | confirmation | rejected confirmation without a persisted latest readback`
       );
     }
     console.log(
-      `${tag} | stage | model=${geminiResponse.order_stage} → resolved=${stage} (missing=${hasMissing}, hardProblem=${hardProblem}, escalate=${escalate}, finalizable=${finalizable})`
+      `${tag} | stage | act=${assistantTurn.dialogue_act} → resolved=${stage} (missing=${hasMissing}, hardProblem=${hardProblem}, escalate=${escalate}, finalizable=${finalizable})`
     );
 
     // --- Cancellation: call off any open draft, send the reply ---
@@ -661,7 +644,7 @@ export async function processInboundMessage(
         messageId,
         inputHash,
         decisionCase: "order_cancelled_by_customer",
-        geminiConfidence: geminiResponse.confidence,
+        geminiConfidence: null,
         orderId: context.collectingOrderId,
       });
       return;
@@ -739,7 +722,7 @@ export async function processInboundMessage(
         messageId,
         inputHash,
         decisionCase: "order_confirmed",
-        geminiConfidence: geminiResponse.confidence,
+        geminiConfidence: null,
         orderId,
         validationDiagnostics: diagnostics,
       });
@@ -760,6 +743,8 @@ export async function processInboundMessage(
     ) {
       outgoing = buildStockShortfallReply(stockShortfalls, replyLanguage);
       console.log(`${tag} | stock | reply did not surface shortfall → overriding with availability notice`);
+    } else if ((diagnostics.invalidVariants?.length ?? 0) > 0) {
+      outgoing = buildInvalidVariantReply(context.catalog, replyLanguage);
     } else {
       outgoing = safeReply;
     }
@@ -776,7 +761,7 @@ export async function processInboundMessage(
       messageId,
       inputHash,
       decisionCase,
-      geminiConfidence: geminiResponse.confidence,
+      geminiConfidence: null,
       orderId,
       validationDiagnostics: diagnostics,
     });
@@ -1026,6 +1011,19 @@ function localizedOrderPlaced(language: "ar" | "en"): string {
   return language === "ar" ? "تم تأكيد طلبك ✅" : "Your order is confirmed ✅";
 }
 
+function buildInvalidVariantReply(
+  catalog: Array<{ name: string; variants: string[] }>,
+  language: "ar" | "en"
+): string {
+  const products = catalog
+    .filter((product) => product.variants.length > 0)
+    .map((product) => `${product.name}: ${product.variants.join("; ")}`)
+    .join(language === "ar" ? "، " : ", ");
+  return language === "ar"
+    ? `الخيار المطلوب غير متوفر. الخيارات المتاحة هي: ${products}. أي خيار تفضل؟`
+    : `That option is unavailable. The available options are: ${products}. Which would you prefer?`;
+}
+
 function buildConfirmationReadback(
   items: Array<{
     product_name: string;
@@ -1048,6 +1046,41 @@ function buildConfirmationReadback(
   return language === "ar"
     ? `للتأكيد: ${itemText}. المجموع ${total} ${currency}، والتوصيل إلى ${address}. هل أؤكد الطلب؟`
     : `To confirm: ${itemText}. Total ${total} ${currency}, delivered to ${address}. Shall I place the order?`;
+}
+
+function buildMissingFieldQuestion(
+  field: string,
+  language: "ar" | "en",
+  catalog: Array<{ id: string; name: string }>
+): string {
+  if (field === "products") {
+    return language === "ar"
+      ? "ما المنتج الذي ترغب بطلبه؟"
+      : "Which product would you like to order?";
+  }
+  if (field === "delivery_address") {
+    return language === "ar"
+      ? "ما عنوان التوصيل؟"
+      : "What is the delivery address?";
+  }
+  if (field === "name") {
+    return language === "ar" ? "ما الاسم للطلب؟" : "What name should I use for the order?";
+  }
+  if (field === "phone") {
+    return language === "ar"
+      ? "ما رقم الهاتف للتواصل بخصوص الطلب؟"
+      : "What phone number should we use for the order?";
+  }
+  if (field.startsWith("variant:")) {
+    const productId = field.slice("variant:".length);
+    const productName = catalog.find((product) => product.id === productId)?.name;
+    return language === "ar"
+      ? `أي خيار تفضل${productName ? ` لـ ${productName}` : ""}؟`
+      : `Which option would you like${productName ? ` for ${productName}` : ""}?`;
+  }
+  return language === "ar"
+    ? "ما المعلومة المتبقية لإكمال الطلب؟"
+    : "What remaining detail should I use to complete the order?";
 }
 
 async function persistGroundedCustomerProfile(

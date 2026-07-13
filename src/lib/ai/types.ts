@@ -87,6 +87,46 @@ export const geminiResponseSchema = z.object({
 export type GeminiResponse = z.infer<typeof geminiResponseSchema>;
 export type GeminiItem = z.infer<typeof geminiItemSchema>;
 
+// --- Provider-neutral model output (prompt v5+) ---
+
+const assistantOrderPatchSchema = z.object({
+  add_or_update_items: z
+    .array(
+      z.object({
+        product_id: z.string(),
+        quantity: z.number().int().positive(),
+        variant: z.string().nullable().optional(),
+      })
+    )
+    .optional(),
+  remove_product_ids: z.array(z.string()).optional(),
+  customer_name: z.string().min(1).optional(),
+  phone: z.string().min(1).optional(),
+  delivery_address: z.string().min(1).optional(),
+});
+
+export const assistantTurnV1Schema = z.object({
+  intent: z.enum(["order", "question", "conversation"]),
+  dialogue_act: z.enum([
+    "answer",
+    "ask_field",
+    "readback",
+    "confirm",
+    "adjust_order",
+    "cancel",
+    "handoff",
+    "acknowledge",
+  ]),
+  reply: z.string().nullable(),
+  needs_human: z.boolean(),
+  requested_field: z.string().nullable(),
+  order_patch: assistantOrderPatchSchema,
+  fact_refs: z.array(z.string()),
+  uncertainty_codes: z.array(z.string()),
+});
+
+export type AssistantTurnV1 = z.infer<typeof assistantTurnV1Schema>;
+
 // --- Pipeline Input ---
 
 export interface PipelineInput {
