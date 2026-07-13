@@ -34,7 +34,7 @@ export default async function DashboardPage() {
     supabase.rpc("dashboard_metrics", { p_merchant_id: merchant.id }),
     supabase
       .from("ai_queue_health")
-      .select("worker_status, queue_depth, oldest_message_age_seconds")
+      .select("worker_status, queue_depth, oldest_message_age_seconds, last_heartbeat_at")
       .eq("merchant_id", merchant.id)
       .maybeSingle(),
   ]);

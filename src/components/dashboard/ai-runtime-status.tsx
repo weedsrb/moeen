@@ -15,9 +15,11 @@ export function AIRuntimeStatus({
   oldestMessageAgeSeconds,
 }: AIRuntimeStatusProps) {
   const aiPaused = aiStatus === "paused";
-  const queueProblem = workerStatus === "degraded" || workerStatus === "offline";
+  const queueProblem =
+    workerStatus === "degraded" || workerStatus === "offline";
 
-  if (!aiPaused && !queueProblem && workerStatus === "not_configured") return null;
+  if (!aiPaused && !queueProblem && workerStatus === "not_configured")
+    return null;
 
   return (
     <Card className={aiPaused || queueProblem ? "border-amber-500/40" : undefined}>
