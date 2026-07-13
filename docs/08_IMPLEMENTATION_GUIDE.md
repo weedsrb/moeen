@@ -1,5 +1,12 @@
 # Mo'een — Implementation Guide
 
+> **Archived initial build guide.** It is retained for product history and must
+> not be used as an implementation backlog. In particular, do not restore
+> Telegram, n8n customer-message orchestration, confidence gates, or direct n8n
+> Supabase access. Current architecture and operations are documented in
+> `03_ARCHITECTURE.md`, `06_N8N_WORKFLOWS.md`, `07_AI_PIPELINE.md`, and
+> `10_AI_AUTOMATION_OPERATIONS.md`.
+
 > Build in phases. Ship each phase. Learn before building the next.
 
 ---

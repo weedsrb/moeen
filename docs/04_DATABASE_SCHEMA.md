@@ -1,5 +1,12 @@
 # Mo'een — Database Schema
 
+> This narrative began as the initial schema specification and contains legacy
+> columns retained for compatibility. The numbered files in
+> `supabase/migrations/` are authoritative. AI queue/cutover state is added in
+> migrations 028–030 and 037; merchant automation/notification state is added
+> in migrations 031–036. See `07_AI_PIPELINE.md` and
+> `10_AI_AUTOMATION_OPERATIONS.md` before changing those tables.
+
 > All tables use Supabase (PostgreSQL). Every table with merchant data includes `merchant_id` and is protected by Row Level Security.
 
 ---

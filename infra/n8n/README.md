@@ -14,8 +14,9 @@ n8n handles merchant operations only; the worker remains the customer AI path.
 4. Install Docker Engine, the Compose plugin, and `age`. Add the deployment user
    to the docker group; disable password SSH and root login.
 5. Copy `.env.example` to `.env` and `.env.worker.example` to `.env.worker`.
-   Generate independent random database/encryption values. Set both files to
-   mode `0600`. Never put Supabase, Gemini, Resend, HMAC, or n8n secrets in Git.
+   Generate independent production and staging database, encryption, Muin HMAC,
+   and Resend values. Set both files to mode `0600`. Never put Supabase,
+   Gemini, Resend, HMAC, or n8n secrets in Git.
 6. Start production with `docker compose up -d --build`. The staging services
    remain disabled unless explicitly started with
    `docker compose --profile staging up -d`.
@@ -26,6 +27,8 @@ Community Edition has no native Git environments. Export workflows without
 credentials to `n8n/workflows`, review the JSON, import them into the disabled
 staging instance, run fixtures, then import into production. Credentials are
 created separately in each n8n instance and are never exported to this repo.
+Staging also uses a separate Muin deployment/HMAC key and Resend test key/sender;
+the Compose profile does not inherit production automation credentials.
 
 ## Operations
 
@@ -39,7 +42,11 @@ created separately in each n8n instance and are never exported to this repo.
   health checks. The application dashboard shows worker heartbeat/queue state.
 - Keep all workflows disabled at first. Enable one workflow only after its dry
   run and HMAC replay/idempotency tests pass.
+- Use `scripts/cutover-ai.sh status` to inspect readiness. Queue activation and
+  rollback require an explicit `AI_CUTOVER_CONFIRM=queue|inline` value and are
+  refused if worker heartbeat coverage is incomplete.
 
-The n8n container receives only Muin HMAC credentials and Resend credentials
-through n8n's encrypted credential store. It never receives the Supabase
-service-role key, Instagram credentials, or direct order-mutation access.
+The n8n container receives only Muin HMAC and Resend environment credentials.
+It never receives the Supabase service-role key, Instagram credentials, or
+direct order-mutation access. See `../../docs/10_AI_AUTOMATION_OPERATIONS.md`
+for the complete deployment and recovery runbook.

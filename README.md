@@ -7,14 +7,16 @@ Mo'een is an Instagram-first order and conversation workspace for Palestinian an
 - Instagram connection, inbound webhooks, durable message storage, media re-hosting, and merchant replies.
 - Multi-business accounts with isolated customers, catalogs, conversations, settings, and orders.
 - Catalog CRUD, spreadsheet import, stock tracking, and low-stock views.
-- Conversational Gemini order collection with burst coalescing, deterministic catalog/stock validation, explicit readback confirmation, flags, and an immutable AI decision audit trail.
-- Realtime dashboard, conversations, order lifecycle, flags, and inventory updates.
+- Provider-neutral conversational order collection with compact context, deterministic catalog/stock/order validation, explicit prior-readback confirmation, human takeover, and privacy-conscious AI telemetry.
+- Durable Supabase AI queues and a standalone Muin worker with leases, retries, dead-letter handling, heartbeats, and a runtime rollback switch.
+- Realtime dashboard, notification center, conversations, order lifecycle, flags, inventory, and per-business AI/automation settings.
+- Five inactive merchant-automation n8n exports plus an OCI Always Free Docker/Traefik/PostgreSQL deployment stack.
 
 ## Runtime architecture
 
-Today, the Instagram webhook stores each message and schedules `processInboundMessage` with Next.js `after()`. The AI pipeline lives in `src/lib/ai/`: it assembles recent context, runs an intent gate and Gemini, validates the returned extraction, updates a single `collecting` order, and sends one reply through the messaging abstraction.
+The Instagram webhook persists each message, then uses a service-role-only runtime switch. `inline` retains the Next.js `after()` compatibility executor; `queue` sends only the message ID to Supabase Queues for `src/worker/index.ts`. Both paths share the compact-context, provider-neutral, deterministically validated pipeline in `src/lib/ai/`.
 
-The next architecture keeps customer conversation processing in Muin but moves it to a durable Supabase-backed worker. Self-hosted n8n is reserved for merchant-facing schedules and notifications; it will not own prompts, order state, Instagram credentials, or customer replies. See `docs/03_ARCHITECTURE.md`, `docs/06_N8N_WORKFLOWS.md`, and `docs/07_AI_PIPELINE.md`.
+Self-hosted n8n is isolated to merchant schedules and prepared Resend email jobs. It does not own prompts, order state, Instagram credentials, customer replies, or Supabase access. Repository exports remain inactive until the operations runbook is executed. See `docs/03_ARCHITECTURE.md`, `docs/06_N8N_WORKFLOWS.md`, `docs/07_AI_PIPELINE.md`, and `docs/10_AI_AUTOMATION_OPERATIONS.md`.
 
 ## Stack
 
@@ -23,10 +25,11 @@ The next architecture keeps customer conversation processing in Muin but moves i
 | Web application | Next.js 16 App Router, React 19, strict TypeScript |
 | UI | Tailwind CSS v4, shadcn/ui, Base UI |
 | Data | Supabase PostgreSQL, Auth, Realtime, Storage |
-| AI | Gemini 2.5 Flash through a server-side pipeline |
+| AI | `AIProvider` adapter; Gemini is the initial provider |
 | Messaging | Provider abstraction; Instagram is the active provider |
 | Hosting | Vercel and Supabase Cloud |
-| Planned automation | Self-hosted n8n Community Edition plus a dedicated Muin worker |
+| Durable execution | Supabase Queues plus a dedicated TypeScript worker |
+| Merchant automation | Self-hosted n8n Community Edition and Resend |
 
 ## Local setup
 
@@ -53,6 +56,8 @@ Run every SQL file in `supabase/migrations/` in numeric order for a fresh databa
 ```bash
 npm run typecheck
 npm run lint
+npm test
+npm run test:eval
 npm run build
 ```
 
@@ -67,10 +72,11 @@ npm run build
 
 ## Documentation
 
-- `docs/03_ARCHITECTURE.md` — deployed architecture and target boundaries.
+- `docs/03_ARCHITECTURE.md` — current runtime topology and ownership boundaries.
 - `docs/04_DATABASE_SCHEMA.md` — database reference.
-- `docs/06_N8N_WORKFLOWS.md` — approved n8n responsibilities and workflow backlog.
-- `docs/07_AI_PIPELINE.md` — current in-process AI implementation.
+- `docs/06_N8N_WORKFLOWS.md` — implemented n8n boundaries, workflows, and protected API.
+- `docs/07_AI_PIPELINE.md` — current inline/worker AI flow, context, state, and provider contract.
+- `docs/10_AI_AUTOMATION_OPERATIONS.md` — deployment, cutover, rollback, monitoring, backup, and recovery.
 - `docs/09_INSTAGRAM.md` — Instagram integration details.
 
 ## License
