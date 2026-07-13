@@ -25,6 +25,7 @@ import {
   normalizeAIProviderError,
 } from "./provider";
 import { reduceAssistantTurn } from "./dialogue-state";
+import type { AIProviderMetadata } from "./provider";
 
 /**
  * How long the pipeline waits before processing an inbound message, so a
@@ -211,6 +212,13 @@ export async function processInboundMessage(
     console.log(
       `${tag} | context | v${context.aiRequest.v}, ${context.aiRequest.recent.length} recent messages, ${context.catalog.length} products, ${context.aiRequest.facts.faqs.length} FAQs, lastOutbound=${context.lastOutboundSenderType ?? "none"}`
     );
+    const contextSizes = {
+      inputCharacters: JSON.stringify(context.aiRequest).length,
+      recentMessages: context.aiRequest.recent.length,
+      summaryCharacters: context.aiRequest.conversation.summary.length,
+      products: context.aiRequest.facts.products.length,
+      faqs: context.aiRequest.facts.faqs.length,
+    };
 
     if (isExplicitHumanRequest(effectiveContent)) {
       // Send one handoff acknowledgement, then lock the conversation to the
@@ -379,6 +387,12 @@ export async function processInboundMessage(
           inputHash,
           decisionCase: "ai_unavailable",
           geminiConfidence: null,
+          telemetry: {
+            attempts: 0,
+            contextSizes,
+            errorClass: "circuit_open",
+            replyOutcome: "none",
+          },
         });
         return;
       }
@@ -387,10 +401,14 @@ export async function processInboundMessage(
 
     // --- Step 3: Call the configured AI provider (with one transient retry) ---
     let assistantTurn: AssistantTurnV1;
+    let modelMetadata: AIProviderMetadata;
+    let aiAttempts = 1;
     const callConversationModel = () => callGemini(context.aiRequest);
 
     try {
-      assistantTurn = await callConversationModel();
+      const result = await callConversationModel();
+      assistantTurn = result.turn;
+      modelMetadata = result.metadata;
     } catch (firstError) {
       const normalizedFirstError = normalizeAIProviderError(firstError);
       console.error(`${tag} | ai_provider | FAILED (attempt 1):`, firstError);
@@ -422,6 +440,12 @@ export async function processInboundMessage(
           inputHash,
           decisionCase: "ai_unavailable",
           geminiConfidence: null,
+          telemetry: {
+            attempts: 1,
+            contextSizes,
+            errorClass: normalizedFirstError.kind,
+            replyOutcome: "none",
+          },
         });
         await maybeTripBreaker(supabase, merchantId, tag);
         return;
@@ -429,8 +453,11 @@ export async function processInboundMessage(
 
       // Backoff with jitter so simultaneous webhooks do not retry in lockstep.
       await sleep(750 + Math.floor(Math.random() * 500));
+      aiAttempts = 2;
       try {
-        assistantTurn = await callConversationModel();
+        const result = await callConversationModel();
+        assistantTurn = result.turn;
+        modelMetadata = result.metadata;
       } catch (secondError) {
         const normalizedSecondError = normalizeAIProviderError(secondError);
         console.error(`${tag} | ai_provider | FAILED (attempt 2):`, secondError);
@@ -458,6 +485,12 @@ export async function processInboundMessage(
           inputHash,
           decisionCase: "ai_unavailable",
           geminiConfidence: null,
+          telemetry: {
+            attempts: 2,
+            contextSizes,
+            errorClass: normalizedSecondError.kind,
+            replyOutcome: "none",
+          },
         });
         // Breaker: this failure may be the one that trips the merchant into a
         // cooldown. Counts recent ai_unavailable flags (including the one just
@@ -482,6 +515,11 @@ export async function processInboundMessage(
       canAcceptConfirmation: context.canAcceptConfirmation,
     });
     const geminiResponse = resolvedTurn.extraction;
+    const baseTelemetry: DecisionTelemetry = {
+      metadata: modelMetadata,
+      attempts: aiAttempts,
+      contextSizes,
+    };
     console.log(
       `${tag} | ai | intent=${assistantTurn.intent}, act=${assistantTurn.dialogue_act}, resolvedStage=${resolvedTurn.stage}, items=${geminiResponse.items.length}, missing=[${resolvedTurn.missingFields.join(",")}], needsHuman=${resolvedTurn.needsHuman}`
     );
@@ -513,12 +551,13 @@ export async function processInboundMessage(
     const reply = assistantTurn.reply;
 
     /** Send one reply to the customer via the conversation channel (no-op on null). */
+    let replyOutcome: ReplyOutcome = "none";
     const sendReply = async (
       text: string | null,
       allowDuringTakeover = false
     ): Promise<void> => {
       if (!text) return;
-      await sendAIMessage(
+      replyOutcome = await sendAIMessage(
         supabase,
         merchantId,
         conversationId,
@@ -543,6 +582,7 @@ export async function processInboundMessage(
         inputHash,
         decisionCase: "intent_other",
         geminiConfidence: null,
+        telemetry: { ...baseTelemetry, replyOutcome },
       });
       return;
     }
@@ -574,6 +614,7 @@ export async function processInboundMessage(
         inputHash,
         decisionCase: reply || escalate ? "question_answered" : "question_flagged",
         geminiConfidence: null,
+        telemetry: { ...baseTelemetry, replyOutcome },
       });
       return;
     }
@@ -646,6 +687,7 @@ export async function processInboundMessage(
         decisionCase: "order_cancelled_by_customer",
         geminiConfidence: null,
         orderId: context.collectingOrderId,
+        telemetry: { ...baseTelemetry, replyOutcome },
       });
       return;
     }
@@ -725,6 +767,7 @@ export async function processInboundMessage(
         geminiConfidence: null,
         orderId,
         validationDiagnostics: diagnostics,
+        telemetry: { ...baseTelemetry, replyOutcome },
       });
       return;
     }
@@ -764,6 +807,7 @@ export async function processInboundMessage(
       geminiConfidence: null,
       orderId,
       validationDiagnostics: diagnostics,
+      telemetry: { ...baseTelemetry, replyOutcome },
     });
   } catch (err) {
     console.error(`${tag} | ERROR |`, err);
@@ -780,6 +824,22 @@ export async function processInboundMessage(
  * mirrors the raw model score today; it is reserved for a future deterministic
  * re-scoring layer.
  */
+type ReplyOutcome = "none" | "sent" | "suppressed" | "failed";
+
+interface DecisionTelemetry {
+  metadata?: AIProviderMetadata;
+  attempts: number;
+  contextSizes?: {
+    inputCharacters: number;
+    recentMessages: number;
+    summaryCharacters: number;
+    products: number;
+    faqs: number;
+  };
+  errorClass?: string;
+  replyOutcome?: ReplyOutcome;
+}
+
 async function recordDecision(
   supabase: ReturnType<typeof createAdminClient>,
   params: {
@@ -799,22 +859,43 @@ async function recordDecision(
     geminiConfidence: number | null;
     orderId?: string | null;
     validationDiagnostics?: ValidationDiagnostics | null;
+    telemetry?: DecisionTelemetry;
   }
 ): Promise<void> {
   try {
+    const metadata = params.telemetry?.metadata;
     const { error } = await supabase.from("ai_decisions").insert({
       merchant_id: params.merchantId,
       conversation_id: params.conversationId,
       message_id: params.messageId,
       order_id: params.orderId ?? null,
-      model_version: AI_CONFIG.model,
+      provider: metadata?.provider ?? process.env.AI_PROVIDER ?? "gemini",
+      model_version: metadata?.model ?? AI_CONFIG.model,
       prompt_version: AI_CONFIG.promptVersion,
+      context_version: 1,
       input_hash: params.inputHash,
       gemini_confidence: params.geminiConfidence,
       // Equals the raw model score today; reserved for deterministic re-scoring.
       effective_confidence: params.geminiConfidence,
       decision_case: params.decisionCase,
       validation_diagnostics: params.validationDiagnostics ?? null,
+      input_tokens: metadata?.usage.inputTokens ?? null,
+      output_tokens: metadata?.usage.outputTokens ?? null,
+      total_tokens: metadata?.usage.totalTokens ?? null,
+      cached_input_tokens: metadata?.usage.cachedInputTokens ?? null,
+      latency_ms: metadata?.latencyMs ?? null,
+      attempts: params.telemetry?.attempts ?? 0,
+      finish_reason: metadata?.finishReason ?? null,
+      context_sizes: params.telemetry?.contextSizes ?? null,
+      error_class: params.telemetry?.errorClass ?? null,
+      reply_outcome: params.telemetry?.replyOutcome ?? null,
+      requested_settings: {
+        temperature: AI_CONFIG.temperature,
+        maxOutputTokens: AI_CONFIG.maxOutputTokens,
+        reasoningBudget: AI_CONFIG.thinkingBudget,
+        streaming: false,
+      },
+      effective_settings: metadata?.effectiveSettings ?? null,
     });
     if (error) {
       console.error(
@@ -1255,7 +1336,7 @@ async function sendAIMessage(
   credentials: Record<string, string>,
   text: string,
   options: { allowDuringTakeover?: boolean } = {}
-): Promise<void> {
+): Promise<Exclude<ReplyOutcome, "none">> {
   if (!options.allowDuringTakeover) {
     // Re-check immediately before the external send to close the race where a
     // merchant takes over while a model call is still in flight.
@@ -1269,7 +1350,7 @@ async function sendAIMessage(
       console.log(
         "[AI Pipeline] sendAI | skipped because human takeover is active or unverifiable"
       );
-      return;
+      return "suppressed";
     }
   }
   console.log(`[AI Pipeline] sendAI | to=${chatId} via ${platform} | "${text.slice(0, 100)}"`);
@@ -1294,7 +1375,7 @@ async function sendAIMessage(
     } else {
       console.error(`[AI Pipeline] sendAI | send failed: ${result.error ?? "unknown"}`);
     }
-    return;
+    return "failed";
   }
 
   // Save outbound AI message to DB
@@ -1318,4 +1399,5 @@ async function sendAIMessage(
       last_message_preview: text.substring(0, 100),
     })
     .eq("id", conversationId);
+  return "sent";
 }

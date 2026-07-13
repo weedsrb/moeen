@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { InventoryAlertsAsync } from "@/components/dashboard/inventory-alerts-async";
 import { InventoryAlertsSkeleton } from "@/components/dashboard/inventory-alerts-skeleton";
 import { InstagramPrompt } from "@/components/dashboard/instagram-prompt";
+import { AIRuntimeStatus } from "@/components/dashboard/ai-runtime-status";
 import { createClient } from "@/lib/supabase/server";
 import { requireMerchant } from "@/lib/auth/require-merchant";
 import type { DashboardMetrics } from "@/types/dashboard";
@@ -24,17 +25,24 @@ export default async function DashboardPage() {
 
   // One settings fetch + one RPC call: dashboard_metrics collapses
   // the 8 KPI counts (migration 009) into a single round trip.
-  const [settingsResult, metricsResult] = await Promise.all([
+  const [settingsResult, metricsResult, queueHealthResult] = await Promise.all([
     supabase
       .from("merchant_settings")
-      .select("low_stock_threshold, instagram_connected")
+      .select("low_stock_threshold, instagram_connected, ai_status")
       .eq("merchant_id", merchant.id)
       .single(),
     supabase.rpc("dashboard_metrics", { p_merchant_id: merchant.id }),
+    supabase
+      .from("ai_queue_health")
+      .select("worker_status, queue_depth, oldest_message_age_seconds")
+      .eq("merchant_id", merchant.id)
+      .maybeSingle(),
   ]);
 
   const threshold = settingsResult.data?.low_stock_threshold ?? 5;
   const instagramConnected = settingsResult.data?.instagram_connected ?? false;
+  const aiStatus = settingsResult.data?.ai_status === "paused" ? "paused" : "active";
+  const workerStatus = queueHealthResult.data?.worker_status ?? "not_configured";
   const metrics = (metricsResult.data ?? null) as DashboardMetrics | null;
 
   const kpiCards = [
@@ -88,6 +96,15 @@ export default async function DashboardPage() {
 
         {/* Instagram setup prompt */}
         {!instagramConnected && <InstagramPrompt />}
+
+        <AIRuntimeStatus
+          aiStatus={aiStatus}
+          workerStatus={workerStatus}
+          queueDepth={queueHealthResult.data?.queue_depth ?? 0}
+          oldestMessageAgeSeconds={
+            queueHealthResult.data?.oldest_message_age_seconds ?? null
+          }
+        />
 
         {/* KPI Cards */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">

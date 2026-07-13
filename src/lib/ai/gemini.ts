@@ -5,6 +5,7 @@ import {
 } from "./types";
 import { getAIProvider } from "./provider-registry";
 import { AIProviderError } from "./provider";
+import type { AIProviderMetadata } from "./provider";
 
 const MAX_INPUT_CHARS = 24_000;
 
@@ -180,7 +181,14 @@ export function buildPrompt(request: AIRequestV1): string {
  *                              exists. The model merges the new message into it so
  *                              the running order is maintained across turns.
  */
-export async function callGemini(request: AIRequestV1): Promise<AssistantTurnV1> {
+export interface ConversationModelResult {
+  turn: AssistantTurnV1;
+  metadata: AIProviderMetadata;
+}
+
+export async function callGemini(
+  request: AIRequestV1
+): Promise<ConversationModelResult> {
   const provider = getAIProvider();
   const prompt = buildPrompt(request);
   if (prompt.length > MAX_INPUT_CHARS) {
@@ -222,6 +230,8 @@ export async function callGemini(request: AIRequestV1): Promise<AssistantTurnV1>
     parsed = JSON.parse(repairTruncatedJson(text));
   }
 
-  const validated = assistantTurnV1Schema.parse(parsed);
-  return validated;
+  return {
+    turn: assistantTurnV1Schema.parse(parsed),
+    metadata: result.metadata,
+  };
 }
