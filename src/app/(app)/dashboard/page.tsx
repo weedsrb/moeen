@@ -6,6 +6,7 @@ import { InventoryAlertsAsync } from "@/components/dashboard/inventory-alerts-as
 import { InventoryAlertsSkeleton } from "@/components/dashboard/inventory-alerts-skeleton";
 import { InstagramPrompt } from "@/components/dashboard/instagram-prompt";
 import { AIRuntimeStatus } from "@/components/dashboard/ai-runtime-status";
+import { NotificationCenter } from "@/components/dashboard/notification-center";
 import { createClient } from "@/lib/supabase/server";
 import { requireMerchant } from "@/lib/auth/require-merchant";
 import type { DashboardMetrics } from "@/types/dashboard";
@@ -25,7 +26,7 @@ export default async function DashboardPage() {
 
   // One settings fetch + one RPC call: dashboard_metrics collapses
   // the 8 KPI counts (migration 009) into a single round trip.
-  const [settingsResult, metricsResult, queueHealthResult] = await Promise.all([
+  const [settingsResult, metricsResult, queueHealthResult, notificationsResult] = await Promise.all([
     supabase
       .from("merchant_settings")
       .select("low_stock_threshold, instagram_connected, ai_status")
@@ -37,6 +38,13 @@ export default async function DashboardPage() {
       .select("worker_status, queue_depth, oldest_message_age_seconds, last_heartbeat_at")
       .eq("merchant_id", merchant.id)
       .maybeSingle(),
+    supabase
+      .from("merchant_notifications")
+      .select("id, category, severity, title, body, order_id, flag_id")
+      .eq("merchant_id", merchant.id)
+      .eq("status", "unread")
+      .order("created_at", { ascending: false })
+      .limit(5),
   ]);
 
   const threshold = settingsResult.data?.low_stock_threshold ?? 5;
@@ -105,6 +113,8 @@ export default async function DashboardPage() {
             queueHealthResult.data?.oldest_message_age_seconds ?? null
           }
         />
+
+        <NotificationCenter items={notificationsResult.data ?? []} />
 
         {/* KPI Cards */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
