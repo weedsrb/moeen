@@ -3,6 +3,15 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 describe("AI worker cutover contract", () => {
+  const queueMigration = readFileSync(
+    join(
+      process.cwd(),
+      "supabase",
+      "migrations",
+      "029_supabase_ai_queues.sql"
+    ),
+    "utf8"
+  );
   const migration = readFileSync(
     join(
       process.cwd(),
@@ -26,6 +35,11 @@ describe("AI worker cutover contract", () => {
     expect(migration).toContain(
       "p_status NOT IN ('completed', 'skipped', 'superseded')"
     );
+  });
+
+  it("does not couple queue wrappers to the PGMQ composite record width", () => {
+    expect(queueMigration).not.toContain("SELECT * FROM pgmq.read");
+    expect(queueMigration.match(/queued\.message/g)).toHaveLength(2);
   });
 
   it("allows only the service role to inspect or change the runtime switch", () => {
@@ -57,4 +71,3 @@ describe("AI worker cutover contract", () => {
     expect(script).not.toContain("SUPABASE_SERVICE_ROLE_KEY=");
   });
 });
-

@@ -136,11 +136,20 @@ LANGUAGE sql
 SECURITY DEFINER
 SET search_path = public, pgmq
 AS $$
-  SELECT * FROM pgmq.read(
+  -- PGMQ 1.5 added a sixth `headers` field to message_record. Select the
+  -- provider-neutral fields explicitly so this wrapper remains stable across
+  -- extension record additions.
+  SELECT
+    queued.msg_id,
+    queued.read_ct::bigint,
+    queued.enqueued_at,
+    queued.vt,
+    queued.message
+  FROM pgmq.read(
     'ai_inbound',
     GREATEST(30, LEAST(p_visibility_seconds, 300)),
     GREATEST(1, LEAST(p_batch_size, 20))
-  );
+  ) AS queued;
 $$;
 
 CREATE OR REPLACE FUNCTION claim_ai_ack_fallback(
@@ -158,11 +167,17 @@ LANGUAGE sql
 SECURITY DEFINER
 SET search_path = public, pgmq
 AS $$
-  SELECT * FROM pgmq.read(
+  SELECT
+    queued.msg_id,
+    queued.read_ct::bigint,
+    queued.enqueued_at,
+    queued.vt,
+    queued.message
+  FROM pgmq.read(
     'ai_ack_fallback',
     GREATEST(15, LEAST(p_visibility_seconds, 120)),
     GREATEST(1, LEAST(p_batch_size, 20))
-  );
+  ) AS queued;
 $$;
 
 CREATE OR REPLACE FUNCTION complete_ai_queue_message(
