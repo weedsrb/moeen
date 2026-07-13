@@ -8,7 +8,7 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
-import { MessageSquare } from "lucide-react";
+import { MessageSquare, UserRound } from "lucide-react";
 import type { Conversation, Customer } from "@/types/message";
 import type { OrderStatus } from "@/types/order";
 
@@ -140,6 +140,12 @@ export function ConversationList({
                       </Badge>
                     )}
                   </div>
+                  {conversation.automation_mode === "human_takeover" && (
+                    <div className="mt-1 flex items-center gap-1 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+                      <UserRound className="h-3 w-3" />
+                      Human takeover
+                    </div>
+                  )}
                 </div>
               </ContextMenuTrigger>
               <ContextMenuContent>

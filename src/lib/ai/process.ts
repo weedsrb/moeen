@@ -22,6 +22,10 @@ import type {
   StockShortfall,
 } from "./validate-extraction";
 import { isGroundedProfileValue } from "./profile-grounding";
+import {
+  enterHumanTakeover,
+  isExplicitHumanRequest,
+} from "./human-takeover";
 
 /**
  * How long the pipeline waits before processing an inbound message, so a
@@ -82,6 +86,29 @@ export async function processInboundMessage(
 
   try {
     console.log(`${tag} | START | "${content.slice(0, 80)}"`);
+
+    // Conversation ownership is a hard gate. A merchant reply, explicit
+    // customer handoff, or manual pause puts the thread in human_takeover until
+    // the merchant explicitly resumes AI.
+    const { data: conversationControl, error: conversationControlError } =
+      await supabase
+        .from("conversations")
+        .select("automation_mode")
+        .eq("id", conversationId)
+        .eq("merchant_id", merchantId)
+        .single();
+    if (conversationControlError || !conversationControl) {
+      console.error(`${tag} | control | unable to verify conversation mode`);
+      return;
+    }
+    if (conversationControl.automation_mode === "human_takeover") {
+      console.log(`${tag} | control | human takeover active → skip AI`);
+      await supabase
+        .from("messages")
+        .update({ ai_processed: true })
+        .eq("id", messageId);
+      return;
+    }
 
     // --- Step 0: Burst debounce (last-message-wins) ---
     // Each rapid fragment schedules its own pipeline run. We sleep briefly;
@@ -185,6 +212,34 @@ export async function processInboundMessage(
     console.log(
       `${tag} | context | ${context.conversationHistory.split("\n").length} messages, ${context.catalog.length} products, lastOutbound=${context.lastOutboundSenderType ?? "none"}`
     );
+
+    if (isExplicitHumanRequest(effectiveContent)) {
+      // Send one handoff acknowledgement, then lock the conversation to the
+      // merchant. This bypasses both classifier and full-model ambiguity.
+      await sendAIMessage(
+        supabase,
+        merchantId,
+        conversationId,
+        messageId,
+        chatId,
+        platform,
+        credentials,
+        context.settings.handoffMessage,
+        { allowDuringTakeover: true }
+      );
+      await raiseHandoffFlag(supabase, {
+        merchantId,
+        conversationId,
+        messageId,
+        takeoverReason: "customer_requested",
+      });
+      await supabase
+        .from("messages")
+        .update({ has_order_signal: false, ai_processed: true })
+        .in("id", burstIds);
+      console.log(`${tag} | control | explicit human request → takeover`);
+      return;
+    }
 
     // --- Step 2: Intent gate (cold-start gate) ---
     // Replaces the old rigid regex pre-filter, which was a hard recall ceiling
@@ -435,7 +490,10 @@ export async function processInboundMessage(
     const reply = geminiResponse.reply_to_customer;
 
     /** Send one reply to the customer via the conversation channel (no-op on null). */
-    const sendReply = async (text: string | null): Promise<void> => {
+    const sendReply = async (
+      text: string | null,
+      allowDuringTakeover = false
+    ): Promise<void> => {
       if (!text) return;
       await sendAIMessage(
         supabase,
@@ -445,14 +503,15 @@ export async function processInboundMessage(
         chatId,
         platform,
         credentials,
-        text
+        text,
+        { allowDuringTakeover }
       );
     };
 
     // --- Non-order intents: no order side effects ---
     if (geminiResponse.intent === "other") {
       if (escalate) await raiseHandoffFlag(supabase, { merchantId, conversationId, messageId });
-      await sendReply(escalate ? settings.handoffMessage : reply);
+      await sendReply(escalate ? settings.handoffMessage : reply, escalate);
       console.log(`${tag} | action | intent=other → ${escalate ? "handoff" : reply ? "reply sent" : "no reply"}`);
       await recordDecision(supabase, {
         merchantId,
@@ -468,7 +527,7 @@ export async function processInboundMessage(
     if (geminiResponse.intent === "question") {
       if (escalate) {
         await raiseHandoffFlag(supabase, { merchantId, conversationId, messageId });
-        await sendReply(settings.handoffMessage);
+        await sendReply(settings.handoffMessage, true);
       } else if (reply) {
         await sendReply(reply);
       } else {
@@ -559,7 +618,7 @@ export async function processInboundMessage(
         await cancelCollectingOrder(supabase, context.collectingOrderId, merchantId);
       }
       if (escalate) await raiseHandoffFlag(supabase, { merchantId, conversationId, messageId });
-      await sendReply(escalate ? settings.handoffMessage : reply);
+      await sendReply(escalate ? settings.handoffMessage : reply, escalate);
       console.log(`${tag} | action | order cancelled by customer${context.collectingOrderId ? ` → ${context.collectingOrderId.slice(0, 8)}` : ""}`);
       await recordDecision(supabase, {
         merchantId,
@@ -634,7 +693,8 @@ export async function processInboundMessage(
       await sendReply(
         escalate
           ? settings.handoffMessage
-          : safeReply ?? localizedOrderPlaced(replyLanguage)
+          : safeReply ?? localizedOrderPlaced(replyLanguage),
+        escalate
       );
       if (escalate) await raiseHandoffFlag(supabase, { merchantId, conversationId, messageId });
       console.log(`${tag} | action | order confirmed → promoted ${orderId.slice(0, 8)} to incoming`);
@@ -668,7 +728,7 @@ export async function processInboundMessage(
     } else {
       outgoing = safeReply;
     }
-    await sendReply(outgoing);
+    await sendReply(outgoing, escalate);
 
     const decisionCase =
       stage === "ready_to_confirm" ? "order_ready_to_confirm" : "order_collecting";
@@ -854,7 +914,12 @@ async function flagStockAndVariantIssues(
  */
 async function raiseHandoffFlag(
   supabase: ReturnType<typeof createAdminClient>,
-  params: { merchantId: string; conversationId: string; messageId: string }
+  params: {
+    merchantId: string;
+    conversationId: string;
+    messageId: string;
+    takeoverReason?: "customer_requested" | "ai_escalation";
+  }
 ): Promise<void> {
   const { merchantId, conversationId, messageId } = params;
   console.log(`[AI Pipeline] ${messageId.slice(0, 8)} | escalation → handoff + flag`);
@@ -868,6 +933,11 @@ async function raiseHandoffFlag(
     description:
       "The AI escalated this conversation — the customer explicitly asked for a person or the request is out of scope. A handoff message was sent.",
     recommended_action: "Take over the conversation and assist the customer.",
+  });
+  await enterHumanTakeover(supabase, {
+    merchantId,
+    conversationId,
+    reason: params.takeoverReason ?? "ai_escalation",
   });
 }
 
@@ -1115,8 +1185,25 @@ async function sendAIMessage(
   chatId: string,
   platform: string,
   credentials: Record<string, string>,
-  text: string
+  text: string,
+  options: { allowDuringTakeover?: boolean } = {}
 ): Promise<void> {
+  if (!options.allowDuringTakeover) {
+    // Re-check immediately before the external send to close the race where a
+    // merchant takes over while a model call is still in flight.
+    const { data: control, error } = await supabase
+      .from("conversations")
+      .select("automation_mode")
+      .eq("id", conversationId)
+      .eq("merchant_id", merchantId)
+      .single();
+    if (error || control?.automation_mode !== "ai") {
+      console.log(
+        "[AI Pipeline] sendAI | skipped because human takeover is active or unverifiable"
+      );
+      return;
+    }
+  }
   console.log(`[AI Pipeline] sendAI | to=${chatId} via ${platform} | "${text.slice(0, 100)}"`);
   const provider = getProvider(platform, credentials);
   const result = await provider.sendMessage(chatId, text);

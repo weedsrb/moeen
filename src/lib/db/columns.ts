@@ -5,7 +5,7 @@ export const MESSAGE_COLUMNS =
   "id, merchant_id, conversation_id, platform_message_id, direction, sender_type, content, message_type, media_url, reply_to_message_id, has_order_signal, ai_processed, created_at" as const;
 
 export const CONVERSATION_COLUMNS =
-  "id, merchant_id, customer_id, platform, platform_chat_id, last_message_at, last_message_preview, unread_count, created_at, updated_at" as const;
+  "id, merchant_id, customer_id, platform, platform_chat_id, last_message_at, last_message_preview, unread_count, automation_mode, takeover_reason, taken_over_at, resumed_at, created_at, updated_at" as const;
 
 export const CONVERSATION_WITH_CUSTOMER_COLUMNS =
   `${CONVERSATION_COLUMNS}, customers(name, platform_user_id, avatar_url)` as const;

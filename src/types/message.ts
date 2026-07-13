@@ -1,6 +1,7 @@
 export type MessageDirection = "inbound" | "outbound";
 export type SenderType = "customer" | "merchant" | "ai" | "system";
 export type MessageType = "text" | "image" | "voice" | "document";
+export type ConversationAutomationMode = "ai" | "human_takeover";
 
 export interface Message {
   id: string;
@@ -28,6 +29,10 @@ export interface Conversation {
   last_message_at: string | null;
   last_message_preview: string | null;
   unread_count: number;
+  automation_mode: ConversationAutomationMode;
+  takeover_reason: string | null;
+  taken_over_at: string | null;
+  resumed_at: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -171,6 +171,10 @@ export async function POST(request: NextRequest) {
     .update({
       last_message_at: new Date().toISOString(),
       last_message_preview: preview,
+      automation_mode: "human_takeover",
+      takeover_reason: "merchant_replied",
+      taken_over_at: new Date().toISOString(),
+      resumed_at: null,
     })
     .eq("id", conversation.id);
 
