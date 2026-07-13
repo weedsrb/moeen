@@ -151,12 +151,22 @@ services:
       N8N_ENCRYPTION_KEY: ${N8N_STAGING_ENCRYPTION_KEY:?set N8N_STAGING_ENCRYPTION_KEY}
       N8N_HOST: ${N8N_STAGING_HOST:?set N8N_STAGING_HOST}
       WEBHOOK_URL: https://${N8N_STAGING_HOST}/
+      MUIN_APP_BASE_URL: ${MUIN_STAGING_APP_BASE_URL:?set MUIN_STAGING_APP_BASE_URL}
+      MUIN_AUTOMATION_HMAC_KEY_ID: ${MUIN_STAGING_AUTOMATION_HMAC_KEY_ID:?set MUIN_STAGING_AUTOMATION_HMAC_KEY_ID}
+      MUIN_AUTOMATION_HMAC_SECRET: ${MUIN_STAGING_AUTOMATION_HMAC_SECRET:?set MUIN_STAGING_AUTOMATION_HMAC_SECRET}
+      RESEND_API_KEY: ${RESEND_STAGING_API_KEY:?set RESEND_STAGING_API_KEY}
+      RESEND_FROM_EMAIL: ${RESEND_STAGING_FROM_EMAIL:?set RESEND_STAGING_FROM_EMAIL}
     depends_on:
       postgres-staging:
         condition: service_healthy
     volumes:
       - n8n_staging_data:/home/node/.n8n
       - ../../n8n/workflows:/exports:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5678/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
     labels:
       - traefik.enable=true
       - traefik.http.routers.n8n-staging.rule=Host(`${N8N_STAGING_HOST}`)

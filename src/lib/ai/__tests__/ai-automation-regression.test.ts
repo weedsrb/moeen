@@ -186,4 +186,17 @@ describe("exported n8n workflow contract", () => {
       expect(raw, file).toContain("error_class");
     }
   });
+
+  it("does not inherit production automation or email credentials in staging", () => {
+    const compose = readFileSync(
+      join(process.cwd(), "infra", "n8n", "docker-compose.yml"),
+      "utf8"
+    );
+    const staging = compose.slice(compose.indexOf("  n8n-staging:"));
+
+    expect(staging).toContain("MUIN_STAGING_APP_BASE_URL");
+    expect(staging).toContain("MUIN_STAGING_AUTOMATION_HMAC_SECRET");
+    expect(staging).toContain("RESEND_STAGING_API_KEY");
+    expect(staging).toContain("RESEND_STAGING_FROM_EMAIL");
+  });
 });
