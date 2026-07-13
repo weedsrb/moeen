@@ -2,6 +2,12 @@
 
 > AI handles language. Rules handle logic. Humans handle judgment.
 
+> **Architecture baseline:** this document describes the currently deployed
+> in-process pipeline. The approved replacement preserves the same customer and
+> order invariants but executes them in a durable Muin worker. n8n remains
+> outside the customer-reply path; see `03_ARCHITECTURE.md` and
+> `06_N8N_WORKFLOWS.md`.
+
 ---
 
 ## Pipeline Overview
