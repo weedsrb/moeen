@@ -9,6 +9,7 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:eval": "vitest run src/lib/ai/__tests__/ai-automation-regression.test.ts",
     "test:watch": "vitest",
     "worker": "tsx src/worker/index.ts",
     "prepare": "husky"
