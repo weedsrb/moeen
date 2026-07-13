@@ -38,6 +38,10 @@ export interface MerchantSettings {
   ai_response_language: string;
   ai_auto_acknowledge: boolean;
   ai_acknowledge_template: string | null;
+  ai_require_customer_name: boolean;
+  ai_require_customer_phone: boolean;
+  ai_acknowledgement_mode: "off" | "delayed";
+  ai_ack_delay_seconds: number;
   low_stock_threshold: number;
   quiet_hours_start: string | null;
   quiet_hours_end: string | null;

@@ -13,7 +13,7 @@ export async function GET() {
     supabase
       .from("merchant_settings")
       .select(
-        "ai_confidence_threshold, ai_auto_clarify, ai_handoff_message, ai_persona_name, ai_tone, ai_greeting, ai_business_context, ai_custom_instructions, ai_response_language, ai_auto_acknowledge, ai_acknowledge_template"
+        "ai_confidence_threshold, ai_auto_clarify, ai_handoff_message, ai_persona_name, ai_tone, ai_greeting, ai_business_context, ai_custom_instructions, ai_response_language, ai_auto_acknowledge, ai_acknowledge_template, ai_require_customer_name, ai_require_customer_phone, ai_acknowledgement_mode, ai_ack_delay_seconds"
       )
       .eq("merchant_id", auth.merchant.id)
       .single(),

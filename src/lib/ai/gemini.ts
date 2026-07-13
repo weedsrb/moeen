@@ -94,13 +94,25 @@ function fenceData(label: string, content: string): string {
  * untrusted MERCHANT_CONTEXT data block (rule 11), NOT here — hoisting the raw
  * business name into these trusted rules would defeat the injection defense.
  */
-function buildSystemRules(currency: string): string {
+function buildSystemRules(
+  currency: string,
+  requiredCustomerFields: Array<"name" | "phone">
+): string {
+  const optionalRequirements = [
+    requiredCustomerFields.includes("name") ? "the customer's name" : null,
+    requiredCustomerFields.includes("phone") ? "the customer's phone" : null,
+  ].filter(Boolean);
+  const customerRequirement =
+    optionalRequirements.length > 0
+      ? ` This merchant also requires ${optionalRequirements.join(" and ")}.`
+      : " Customer name and phone are optional for this merchant.";
+
   return `You are Mo'een, a friendly order-taking assistant chatting with customers on behalf of a small business. The business you represent — its identity, tone, language rule, and knowledge base — is described in the MERCHANT_CONTEXT data block below. You run a natural, multi-turn conversation: you gather every detail an order needs by ASKING for it, you check the catalog for availability, you read the order back, and you only mark an order "confirmed" once the customer has explicitly agreed.
 
 RULES:
 1. INTENT: Decide whether the latest message is part of an ORDER, a QUESTION about the business/products, or general conversation ("other"). Set "intent" accordingly.
 
-2. REQUIRED FIELDS (orders): A complete order needs — the product(s); a quantity for each; a variant for a product ONLY when that catalog product actually offers variants; a delivery address; and the customer's name and phone. These requirements come from the merchant's settings/context. Ask for whatever is still missing, ONE natural question at a time (never a checklist), in the customer's language. List every still-unknown field in "missing_fields".
+2. REQUIRED FIELDS (orders): Every complete order needs the product(s), a quantity for each, a variant only when that catalog product offers variants, and a delivery address.${customerRequirement} Ask for whatever is still required, ONE natural question at a time (never a checklist), in the customer's language. List only required-but-unknown fields in "missing_fields".
 
 3. CATALOG & STOCK: Match every product the customer names to a catalog entry — customers use dialect, abbreviations, and informal names, so lean on each product's alternative names. Read each product's "stock". NEVER promise more than is available: if the customer asks for more than the stock, tell them the real quantity you can offer and ask them to adjust. Never invent products, prices, variants, or stock — use only what the CATALOG block provides. All prices and order totals are in ${currency}.
 
@@ -154,11 +166,12 @@ export function buildPrompt(params: {
   catalog: CompressedProduct[];
   orderSoFar: string;
   customerContext: string;
+  requiredCustomerFields: Array<"name" | "phone">;
   conversationHistory: string;
   currentMessage: string;
 }): string {
   return [
-    buildSystemRules(params.currency),
+    buildSystemRules(params.currency, params.requiredCustomerFields),
     fenceData("MERCHANT_CONTEXT", params.merchantContext),
     fenceData("CATALOG", JSON.stringify(params.catalog, null, 2)),
     fenceData("CUSTOMER_PROFILE", params.customerContext),
@@ -188,7 +201,12 @@ export function buildPrompt(params: {
 export async function callGemini(
   conversationHistory: string,
   catalog: CompressedProduct[],
-  settings: { confidenceThreshold: number; currency: string },
+  settings: {
+    confidenceThreshold: number;
+    currency: string;
+    requireCustomerName: boolean;
+    requireCustomerPhone: boolean;
+  },
   currentMessage: string,
   merchantContext: string,
   orderSoFar: string,
@@ -219,6 +237,10 @@ export async function callGemini(
     catalog,
     orderSoFar,
     customerContext,
+    requiredCustomerFields: [
+      ...(settings.requireCustomerName ? (["name"] as const) : []),
+      ...(settings.requireCustomerPhone ? (["phone"] as const) : []),
+    ],
     conversationHistory,
     currentMessage,
   });

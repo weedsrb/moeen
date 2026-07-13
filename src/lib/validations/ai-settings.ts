@@ -12,6 +12,10 @@ export const updateAISettingsSchema = z.object({
   ai_response_language: z.enum(["auto", "ar", "en"]).optional(),
   ai_auto_acknowledge: z.boolean().optional(),
   ai_acknowledge_template: z.string().max(500).nullable().optional(),
+  ai_require_customer_name: z.boolean().optional(),
+  ai_require_customer_phone: z.boolean().optional(),
+  ai_acknowledgement_mode: z.enum(["off", "delayed"]).optional(),
+  ai_ack_delay_seconds: z.number().int().min(5).max(60).optional(),
 });
 
 // Cap on the number of FAQ rows a merchant can create. Each row is injected

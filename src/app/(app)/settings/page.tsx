@@ -34,7 +34,7 @@ export default async function SettingsPage() {
   const [settingsResult, faqResult] = await Promise.all([
     supabase
       .from("merchant_settings")
-      .select("instagram_connected, instagram_username, ai_confidence_threshold, ai_auto_clarify, ai_handoff_message, ai_persona_name, ai_tone, ai_greeting, ai_business_context, ai_custom_instructions, ai_response_language, ai_auto_acknowledge, ai_acknowledge_template")
+      .select("instagram_connected, instagram_username, ai_handoff_message, ai_persona_name, ai_tone, ai_greeting, ai_business_context, ai_custom_instructions, ai_response_language, ai_acknowledge_template, ai_require_customer_name, ai_require_customer_phone, ai_acknowledgement_mode, ai_ack_delay_seconds")
       .eq("merchant_id", merchant.id)
       .single(),
 
@@ -79,10 +79,13 @@ export default async function SettingsPage() {
         {/* AI Behavior */}
         <div id="ai-behavior">
           <AIBehaviorSettings
-            initialConfidenceThreshold={s?.ai_confidence_threshold ?? 0.7}
-            initialAutoClarity={s?.ai_auto_clarify ?? true}
             initialHandoffMessage={s?.ai_handoff_message ?? "A team member will assist you shortly."}
-            initialAutoAcknowledge={s?.ai_auto_acknowledge ?? false}
+            initialRequireCustomerName={s?.ai_require_customer_name ?? false}
+            initialRequireCustomerPhone={s?.ai_require_customer_phone ?? false}
+            initialAcknowledgementMode={
+              s?.ai_acknowledgement_mode === "delayed" ? "delayed" : "off"
+            }
+            initialAcknowledgementDelaySeconds={s?.ai_ack_delay_seconds ?? 12}
             initialAcknowledgeTemplate={s?.ai_acknowledge_template ?? null}
           />
         </div>
