@@ -26,6 +26,7 @@ import {
   enterHumanTakeover,
   isExplicitHumanRequest,
 } from "./human-takeover";
+import { resolveRequiredMissingFields } from "./order-policy";
 
 /**
  * How long the pipeline waits before processing an inbound message, so a
@@ -395,6 +396,8 @@ export async function processInboundMessage(
         {
           confidenceThreshold: context.settings.confidenceThreshold,
           currency: context.settings.currency,
+          requireCustomerName: context.settings.requireCustomerName,
+          requireCustomerPhone: context.settings.requireCustomerPhone,
         },
         effectiveContent,
         context.merchantContext,
@@ -410,6 +413,8 @@ export async function processInboundMessage(
           {
             confidenceThreshold: context.settings.confidenceThreshold,
             currency: context.settings.currency,
+            requireCustomerName: context.settings.requireCustomerName,
+            requireCustomerPhone: context.settings.requireCustomerPhone,
           },
           effectiveContent,
           context.merchantContext,
@@ -557,10 +562,23 @@ export async function processInboundMessage(
 
     // --- intent === "order": run the stage machine ---
     const validation = validateExtraction(geminiResponse, context.catalog);
-    const hasMissing = geminiResponse.missing_fields.length > 0;
+    const effectiveMissingFields = resolveRequiredMissingFields({
+      modelMissingFields: geminiResponse.missing_fields,
+      requireCustomerName: context.settings.requireCustomerName,
+      requireCustomerPhone: context.settings.requireCustomerPhone,
+      customer: {
+        name: geminiResponse.customer_info.name ?? context.customerProfile.name,
+        phone:
+          geminiResponse.customer_info.phone ?? context.customerProfile.phone,
+        deliveryAddress:
+          geminiResponse.customer_info.delivery_address ??
+          context.customerProfile.deliveryAddress,
+      },
+    });
+    const hasMissing = effectiveMissingFields.length > 0;
     const hardProblem = hasHardAvailabilityProblem(validation);
     const stockShortfalls = getStockShortfalls(validation, context.catalog);
-    const finalizable = isFinalizable(validation, geminiResponse.missing_fields);
+    const finalizable = isFinalizable(validation, effectiveMissingFields);
     const diagnostics = validation.diagnostics;
     const replyLanguage = resolveReplyLanguage(
       context.settings.responseLanguage,
@@ -647,7 +665,7 @@ export async function processInboundMessage(
         currency: context.settings.currency,
         collectingOrderId: context.collectingOrderId,
         collectionState: {
-          missing_fields: geminiResponse.missing_fields,
+          missing_fields: effectiveMissingFields,
           awaiting_confirmation:
             stage === "ready_to_confirm" ||
             (stage === "confirmed" && context.canAcceptConfirmation),

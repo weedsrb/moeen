@@ -92,7 +92,7 @@ export async function assembleContext(
 
       supabase
         .from("merchant_settings")
-        .select("ai_confidence_threshold, ai_auto_clarify, ai_handoff_message, ai_persona_name, ai_tone, ai_greeting, ai_business_context, ai_custom_instructions, ai_response_language, ai_auto_acknowledge, ai_acknowledge_template")
+        .select("ai_confidence_threshold, ai_auto_clarify, ai_handoff_message, ai_persona_name, ai_tone, ai_greeting, ai_business_context, ai_custom_instructions, ai_response_language, ai_auto_acknowledge, ai_acknowledge_template, ai_require_customer_name, ai_require_customer_phone, ai_acknowledgement_mode, ai_ack_delay_seconds")
         .eq("merchant_id", merchantId)
         .single(),
 
@@ -228,6 +228,13 @@ export async function assembleContext(
     responseLanguage: s?.ai_response_language ?? "auto",
     autoAcknowledge: s?.ai_auto_acknowledge ?? false,
     acknowledgeTemplate: s?.ai_acknowledge_template ?? null,
+    requireCustomerName: s?.ai_require_customer_name ?? false,
+    requireCustomerPhone: s?.ai_require_customer_phone ?? false,
+    acknowledgementMode:
+      s?.ai_acknowledgement_mode === "delayed"
+        ? ("delayed" as const)
+        : ("off" as const),
+    acknowledgementDelaySeconds: s?.ai_ack_delay_seconds ?? 12,
   };
 
   // --- Merchant context string (merchant layer for Gemini prompt) ---

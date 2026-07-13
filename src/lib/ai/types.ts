@@ -143,6 +143,10 @@ export interface AssembledContext {
     responseLanguage: string;
     autoAcknowledge: boolean;
     acknowledgeTemplate: string | null;
+    requireCustomerName: boolean;
+    requireCustomerPhone: boolean;
+    acknowledgementMode: "off" | "delayed";
+    acknowledgementDelaySeconds: number;
   };
   merchantContext: string;
   lastOutboundSenderType: SenderType | null;
