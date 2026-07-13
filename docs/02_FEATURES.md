@@ -1,5 +1,10 @@
 # Mo'een — Features Specification
 
+> **Historical product specification.** Telegram, customer status DMs,
+> confidence-gated order creation, and direct n8n database behavior below are
+> not current architecture. Use `03_ARCHITECTURE.md`, `06_N8N_WORKFLOWS.md`,
+> `07_AI_PIPELINE.md`, and the implemented application as authoritative.
+
 > Every feature exists to answer one question: does this help the merchant act faster and feel more in control?
 
 ---

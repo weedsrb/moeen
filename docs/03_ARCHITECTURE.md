@@ -1,90 +1,109 @@
-# Mo'een system architecture
+# Muin system architecture
 
-This document separates deployed behavior from the approved worker/n8n target so implementation decisions do not depend on stale Telegram or n8n diagrams.
+Status: repository implementation complete; external infrastructure activation
+is controlled by the operations runbook.
 
-## Deployed architecture
+## Runtime topology
 
 ```text
 Instagram customer
-  -> Meta webhook
-  -> POST /api/webhooks/instagram
-  -> resolve merchant/customer/conversation
-  -> persist inbound message in Supabase
-  -> return 200 to Meta
-  -> Next.js after(processInboundMessage)
-  -> 8-second last-message-wins burst coalescing
-  -> intent classifier when the conversation is cold
-  -> context assembly + Gemini 2.5 Flash
-  -> deterministic product/price/variant/stock validation
-  -> collecting-order update, confirmation, cancellation, or escalation
-  -> provider-agnostic outbound send
-  -> persist outbound message and AI decision audit
+  -> Next.js webhook
+  -> Supabase messages
+  -> runtime switch
+     -> inline compatibility executor, or
+     -> Supabase AI queue -> dedicated Muin worker
+  -> AIProvider -> AssistantTurnV1
+  -> deterministic validation/reducer/order transition
+  -> Instagram response
+
+Supabase domain event / n8n schedule
+  -> HMAC-protected Muin automation API
+  -> flags + dashboard notifications + prepared automation jobs
+  -> n8n claims email job -> Resend -> n8n reports result
 ```
 
-Authoritative entry points:
-
-- `src/app/api/webhooks/instagram/route.ts`
-- `src/lib/ai/process.ts`
-- `src/lib/ai/context.ts`
-- `src/lib/ai/gemini.ts`
-- `src/lib/ai/validate-extraction.ts`
-- `src/lib/ai/order-creator.ts`
-
-The deployed pipeline has no n8n dependency. `after()` is bounded by the route's deployment lifetime, which is why durable execution is planned.
-
-## Approved target architecture
-
-```text
-Instagram webhook -> Supabase message -> Supabase AI queue -> Muin AI worker
-                                                       -> provider adapter
-                                                       -> deterministic reducer
-                                                       -> Instagram reply
-
-Supabase domain event -> automation job -> protected Muin API <- n8n schedule
-                                                      n8n -> Resend merchant email
-                                                      Muin -> dashboard flag/notification
-```
-
-### Ownership boundaries
+## Ownership
 
 | Component | Owns | Must not own |
 |---|---|---|
-| Next.js | Webhooks, authenticated APIs, dashboard, validation boundaries | Long-running AI execution |
-| Supabase | Source-of-truth records, RLS, durable queues/jobs, idempotency | Prompt behavior |
-| Muin AI worker | Context building, provider calls, deterministic dialogue/order orchestration, customer replies | Merchant scheduled automation |
-| n8n | Merchant alert schedules, Resend delivery, retry orchestration | Prompts, customer replies, order mutations, Supabase service-role credentials |
-| AI provider | Language interpretation and proposed reply/state delta | Prices, totals, stock truth, confirmation authority, database writes |
+| Next.js | Webhooks, authenticated APIs, dashboard, validation boundaries, inline rollback executor | Scheduled operational orchestration |
+| Supabase | Source-of-truth data, RLS, queues, outbox jobs, idempotency, deterministic scans | Prompt behavior |
+| Muin worker | Durable conversation execution, provider calls, validated customer replies | Merchant email schedules |
+| n8n | Merchant schedules, prepared-email delivery, execution retry/reporting | Prompts, customer DMs, order mutations, Supabase/Instagram credentials |
+| AI provider | Language interpretation, response wording, proposed order patch | Prices, totals, stock truth, confirmation authority, actions, database writes |
+| Merchant | Business policy, catalog/facts, takeover/resume, operational decisions | Overriding core safety and deterministic invariants |
 
-## Security boundaries
+## Customer conversation path
 
-- Webhook and internal Route Handlers are public network endpoints and validate authentication at the handler.
-- Browser clients use tenant-scoped Supabase sessions; service-role access remains server-only.
-- n8n receives only a rotating HMAC credential and minimal prepared job payloads.
-- Provider and customer content is treated as untrusted data and cannot override core rules.
-- Internal IDs are included in model context only when required to validate a proposed action.
-- Full prompts and raw credentials are not written to logs or AI audit rows.
+`src/app/api/webhooks/instagram/route.ts` verifies Meta requests and persists an
+inbound message before dispatch. `ai_runtime_settings.ai_execution_backend`
+selects `inline` or `queue`:
 
-## Current settings truth
+- `inline` schedules `processInboundMessage()` through Next.js `after()` and is
+  retained for one rollback window.
+- `queue` sends only the message ID to Supabase Queues. `src/worker/index.ts`
+  re-fetches authoritative data and credentials, owns burst/lease/retry logic,
+  and calls the shared pipeline.
 
-The live pipeline reads persona, tone, greeting, business context, custom instructions, response language, handoff message, acknowledgement settings, confidence threshold, and auto-clarify. The last two are legacy controls: deterministic finalizability and confirmation now gate order creation, while the agent always asks for required details. The settings UI still describes the older behavior and is scheduled for replacement.
+`src/lib/ai/process.ts` assembles compact context, calls the provider-neutral
+adapter, runs the deterministic reducer/validators, persists the order/profile
+delta, sends one complete provider response, and records bounded telemetry.
 
-## Known baseline risks
+No order is promoted unless the draft is finalizable and confirmation refers
+to the latest prior AI readback. Human takeover suppresses both AI and delayed
+acknowledgements until manual resume.
 
-- `orders.ai_collection_state` stores confirmation metadata but the live context does not load it back.
-- The current message can appear in recent history and again as the current task.
-- Large-catalog filtering can omit products already present in an open order.
-- Context query failures are treated like empty data in several places.
-- Customer profile fields are not consistently injected or persisted after validation.
-- A handoff flag does not currently suspend AI, and a merchant reply does not take over the conversation.
-- The full prompt repeats catalog/FAQ/context blocks and allows up to 8,192 output tokens plus thinking.
-- AI execution depends on `after()` and an immediate retry rather than a durable queue.
-- n8n workflows, worker infrastructure, notification jobs, and regression evaluations are not yet implemented.
+## Merchant automation path
 
-## Deployment baseline
+Muin creates flags, dashboard notifications, and prepared email jobs in its own
+database. n8n invokes only protected routes under
+`/api/internal/automation/`, using a five-minute HMAC request window and replay
+protection. It claims minimal email payloads, calls Resend with Muin's
+idempotency key, and reports completion/failure.
 
-- Next.js: Vercel
-- Database/Auth/Realtime/Storage: Supabase Cloud
-- AI: Gemini API
-- Messaging: Instagram Graph API through `MessagingProvider`
-- Scheduled application cron: Vercel cron for Instagram token refresh
-- n8n/worker: not deployed yet
+Dashboard notifications are independent of n8n and Resend, so operational
+visibility survives OCI/email downtime. Daily summaries are deterministic and
+make no model call.
+
+## Tenant and secret boundaries
+
+- Browser data is tenant-scoped by Supabase sessions/RLS and `merchant_id`.
+- Service-role, provider, and channel credentials stay in server/worker
+  environments.
+- n8n has a Muin HMAC credential and Resend key only.
+- The worker and n8n use separate environment files/containers.
+- Staging uses a separate n8n database, encryption key, Muin deployment/HMAC
+  key, Resend key, and sender.
+- Full prompts, raw customer transcripts, and secrets are not stored in AI
+  telemetry.
+- Merchant/customer text is treated as untrusted data and cannot override
+  system rules, output schema, or actions.
+
+## Authoritative files
+
+- AI flow: `docs/07_AI_PIPELINE.md`
+- n8n flow: `docs/06_N8N_WORKFLOWS.md`
+- Operations: `docs/10_AI_AUTOMATION_OPERATIONS.md`
+- Instagram: `src/app/api/webhooks/instagram/route.ts`
+- AI orchestration: `src/lib/ai/process.ts`
+- AI worker: `src/worker/index.ts`
+- Compact context: `src/lib/ai/context.ts`
+- Provider/output: `src/lib/ai/provider.ts`, `src/lib/ai/gemini.ts`
+- State and facts: `src/lib/ai/dialogue-state.ts`,
+  `src/lib/ai/validate-extraction.ts`, `src/lib/ai/confirmation.ts`
+- Automation APIs: `src/app/api/internal/automation/`
+- Workflow exports: `n8n/workflows/`
+- Free OCI stack: `infra/n8n/`
+- Database history: `supabase/migrations/`
+
+## Deployment topology
+
+- Next.js application: Vercel-compatible deployment.
+- Database/Auth/Realtime/Storage/Queues: Supabase.
+- Initial AI provider: Gemini behind `AIProvider`.
+- Messaging: Instagram Graph API behind `MessagingProvider`.
+- Worker/n8n: separate containers on one OCI Always Free VM, with Traefik and a
+  PostgreSQL database dedicated to n8n.
+
+The repository defaults to the inline executor and inactive n8n exports. No
+external cutover occurs merely by merging application code.

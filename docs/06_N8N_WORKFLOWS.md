@@ -1,77 +1,137 @@
-# Mo'een n8n workflow specification
+# Muin n8n workflows
 
-Status: approved architecture, not yet deployed.
+Status: implemented as inactive, credential-free exports. Activation is an
+operations step, not part of application deployment.
 
 ## Boundary
 
-n8n is a merchant-operations runner. It does not receive Instagram webhooks, run customer prompts, call the conversational model, mutate orders directly, or send customer messages. The Muin application and dedicated worker retain those responsibilities.
+n8n is a merchant-operations runner. It does not receive Instagram webhooks,
+assemble prompts, call the conversation model, read or mutate Supabase
+directly, change orders, or send customer messages.
 
-n8n accesses business operations only through HMAC-authenticated Muin endpoints. It stores a Muin HMAC credential and a Resend credential, never a Supabase service-role key or Instagram token.
+Muin owns domain scans, flags, dashboard notifications, job preparation,
+deduplication, and protected APIs. n8n owns schedules, claiming prepared email
+jobs, Resend delivery, and reporting success/failure.
 
-## Workflow inventory
+The n8n container receives only:
 
-| Workflow | Trigger | Result | AI |
+- Muin application base URL.
+- A rotatable Muin HMAC key ID and secret.
+- Resend API key and verified sender.
+- n8n's own PostgreSQL and encryption credentials.
+
+It never receives a Supabase service-role key, Gemini key, Instagram token, or
+direct database connection. The separate `muin-worker` container has its own
+mode-0600 environment file and is not exposed to n8n.
+
+## Implemented workflow inventory
+
+All exports live under `n8n/workflows/` and have `active: false`.
+
+| Export | Trigger | Muin result | Email behavior |
 |---|---|---|---|
-| New order alerts | Durable `collecting -> incoming` job | Merchant dashboard notification and optional email | No |
-| Customer wait monitor | Every 5 minutes | Upsert/resolve waiting flags and critical email jobs | No |
-| Inventory alerts | Threshold-crossing job plus reconciliation | Upsert/resolve stock flags and optional email | No |
-| Stale order monitor | Every 30 minutes | Upsert/resolve stale-order flags and optional email | No |
-| Daily summary | Every 15 minutes; merchant local due time | Deterministic dashboard/email summary | No |
-| Workflow health | Every 5 minutes | Retry expired leases and report repeated failures | No |
+| `new-order-alerts.json` | Every minute; domain event is transaction-triggered on `collecting -> incoming` | Dashboard notification and prepared job | Optional; suppress merchant-originated transitions unless configured |
+| `customer-wait-alerts.json` | Every 5 minutes | Upsert medium/critical waiting flags and resolve after response | First configured escalation; excludes AI-processing/ack window |
+| `inventory-alerts.json` | Every 5 minutes; state transitions are transaction-triggered | Low/out-of-stock flags and notifications; resolve after restock | First crossing or critical escalation only |
+| `stale-order-alerts.json` | Every 30 minutes | Deduplicated status/threshold flag and notification; resolve on status advance | Optional according to severity/preferences |
+| `daily-summary.json` | Every 15 minutes | Deterministic localized metrics for merchants due in their timezone | Optional; no AI/model call |
 
-The former Incoming Message Handler is retired from the n8n design. The former customer Order Status Notification workflow is replaced by merchant-only new-order and exception alerts.
+The retired n8n Incoming Message Handler is intentionally absent. The retired
+customer-facing Order Status Notification is replaced by merchant-only new
+order and exception alerts.
 
-## Protected API contract
+## Domain implementation
 
-Planned endpoints:
+`src/lib/automation/schedules.ts` dispatches allow-listed workflow types.
+Database migrations own idempotent domain logic:
 
-- `POST /api/internal/automation/schedules/:type`
+- `032_automation_api_and_new_orders.sql`
+- `033_customer_wait_alerts.sql`
+- `034_inventory_alerts.sql`
+- `035_stale_order_alerts.sql`
+- `036_daily_summary.sql`
+
+Core tables:
+
+- `merchant_automation_settings` — timezone, notification email, quiet hours,
+  workflow toggles, thresholds, summary time, and email preferences.
+- `merchant_notifications` — dashboard delivery independent of n8n/Resend.
+- `automation_jobs` — prepared email outbox with unique dedupe/idempotency key,
+  lease, attempts, and terminal result.
+- `automation_workflow_errors` — operational error audit.
+- `automation_hmac_replays` — signature replay prevention.
+- Existing `flags` — actionable waiting, inventory, stale-order, handoff, and AI
+  failure issues.
+
+## Protected API
+
+Implemented Route Handlers:
+
+- `POST /api/internal/automation/schedules/[type]`
 - `POST /api/internal/automation/jobs/claim`
-- `POST /api/internal/automation/jobs/:id/complete`
-- `POST /api/internal/automation/jobs/:id/fail`
+- `POST /api/internal/automation/jobs/[id]/complete`
+- `POST /api/internal/automation/jobs/[id]/fail`
 - `POST /api/internal/automation/errors`
 
-Every request includes a key ID, timestamp, SHA-256 body hash, and HMAC signature. Muin rejects unknown keys, signature mismatch, timestamps outside five minutes, and replayed signatures.
+`readAuthenticatedAutomationRequest()` and
+`verifyAutomationRequest()` enforce:
 
-The claim response contains a minimal prepared job: job ID/type, idempotency key, recipient, locale, subject/text/HTML, severity, and non-sensitive entity reference. n8n sends email through Resend and reports the provider result. Dashboard notifications and flags are created by Muin, not by arbitrary n8n SQL.
+- Allow-listed key ID.
+- Unix timestamp no older/newer than five minutes.
+- SHA-256 hash of the exact request body.
+- HMAC-SHA256 over method, path, timestamp, and body hash.
+- Constant-time signature comparison.
+- One-time signature storage to reject replay.
 
-## Idempotency and retries
+The claim response is a minimal prepared payload: job ID/type, idempotency key,
+recipient, locale, subject, text/HTML, severity, and bounded entity reference.
+n8n sends it through Resend using the job idempotency key, then reports the
+provider message ID or a bounded error. It cannot submit arbitrary SQL or an
+order mutation.
 
-- `automation_jobs.dedupe_key` is unique.
-- Jobs are claimed with a lease; expired leases become claimable again.
-- Resend uses the same idempotency key as the job.
-- Transient failures retry with exponential backoff and jitter, to a fixed attempt limit.
-- Permanent or exhausted failures remain visible on the dashboard and in the workflow error audit.
-- Workflow effects are safe when n8n repeats a request or crashes after delivery.
+## Retry and failure semantics
 
-## Default policies
+- `automation_jobs.dedupe_key` prevents duplicate logical jobs.
+- A claim creates a bounded lease; expired leases become claimable again.
+- Resend receives the same stable idempotency key on every attempt.
+- Success and permanent/exhausted failure are reported to Muin.
+- A workflow execution error may also be written to the protected error API.
+- Dashboard notifications already exist before email delivery; n8n, OCI, or
+  Resend downtime cannot remove dashboard visibility.
+- Noncritical email may be deferred by quiet hours or quota. Resend's monthly
+  and daily usage is tracked by Muin before jobs are prepared.
 
-- Customer waiting: medium after 60 minutes, critical after 120 minutes.
-- Stale incoming order: medium after 30 minutes, critical after 120 minutes.
-- Stale pending order: critical after 24 hours.
-- Stale confirmed order: medium after 48 hours.
-- Daily summary: 21:00 in the merchant timezone.
-- Low-stock thresholds reuse the merchant/product inventory settings.
-- Quiet hours delay noncritical email; critical behavior is merchant-configurable.
-- Dashboard delivery remains available when n8n or Resend is unavailable.
+## Defaults
 
-## Free self-hosting target
+- Customer waiting: medium at 60 minutes, critical at 120 minutes.
+- Stale incoming order: 30/120 minutes.
+- Stale pending order: 24 hours.
+- Stale confirmed order: 48 hours.
+- Daily summary: 21:00 in merchant timezone; due check every 15 minutes.
+- Inventory: notify on healthy-to-low/out threshold crossing, severity upgrade,
+  and resolve after restock.
+- Dashboard delivery always on. Email only after a successful verification
+  test and according to merchant workflow preferences.
 
-One Oracle Cloud Always Free VM runs separate Docker containers for:
+## Free deployment
 
-- Traefik for HTTPS and reverse proxying.
+`infra/n8n/docker-compose.yml` targets one OCI Always Free Ampere VM:
+
+- Traefik with automatic HTTPS.
 - n8n Community Edition in regular mode.
-- PostgreSQL dedicated to n8n state.
-- The Muin AI worker, which connects to Supabase but not the n8n database.
+- PostgreSQL dedicated to n8n.
+- A separate Muin AI worker container.
 
-Redis and n8n queue mode are intentionally omitted at the initial scale. Supabase owns Muin's durable AI queue and automation job records. Workflow JSON is exported without credentials into `automation/n8n/workflows/` because Community Edition does not provide native Git-backed environments.
+Redis and n8n queue mode are intentionally omitted. n8n Community Edition does
+not provide native Git-backed environments, so reviewed JSON exports are the
+source-controlled promotion artifact. Production and the disabled staging
+profile use separate PostgreSQL databases, n8n encryption keys, Muin endpoints,
+HMAC keys, Resend keys, and senders.
 
-Required operations include pinned image versions, health checks, restricted SSH/firewall rules, execution pruning, PostgreSQL backups, encryption-key backup, restore drills, secret rotation, and a disabled staging profile with separate database/credentials.
+Image versions are pinned. Successful execution payloads are not retained;
+failed execution data is pruned after the configured window. Encrypted `age`
+backups and restore scripts live in `infra/n8n/scripts/`.
 
-## Explicit non-goals
-
-- No customer-facing order status DMs from n8n.
-- No AI-generated daily narrative in v1.
-- No direct Supabase REST/RPC access from n8n.
-- No prompt text or model configuration inside workflows.
-- No order state transitions inside workflows.
+See `infra/n8n/README.md` for host setup and
+`docs/10_AI_AUTOMATION_OPERATIONS.md` for staging, activation, rollback,
+backup, restore, and secret-rotation runbooks.
