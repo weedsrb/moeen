@@ -146,6 +146,8 @@ export interface PipelineInput {
   /** Skip burst debounce (sleep + successor check + gather). Set by the
    *  reprocess endpoint, which runs inline on a single historical message. */
   skipDebounce?: boolean;
+  /** Queue deliveries are already delayed, so gather/check ownership without sleeping. */
+  executionMode?: "inline" | "queue";
 }
 
 // --- Compressed Catalog ---

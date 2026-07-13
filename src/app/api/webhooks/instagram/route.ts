@@ -6,6 +6,11 @@ import {
   rehostInstagramAudio,
 } from "@/lib/messaging/rehost-media";
 import { processInboundMessage } from "@/lib/ai/process";
+import {
+  enqueueAcknowledgementFallback,
+  enqueueInboundAI,
+  getAIExecutionBackend,
+} from "@/lib/ai/queue";
 import type { InstagramWebhookPayload } from "@/types/instagram";
 
 // The AI pipeline now debounces bursts (sleeps ~8s) before calling Gemini
@@ -128,6 +133,7 @@ export async function POST(request: NextRequest) {
     }
 
     const supabase = createAdminClient();
+    const executionBackend = await getAIExecutionBackend(supabase);
 
     for (const entry of body.entry) {
       const igAccountId = entry.id;
@@ -312,39 +318,75 @@ export async function POST(request: NextRequest) {
           settings.ai_acknowledgement_mode === "delayed" &&
           settings.ai_acknowledge_template
         ) {
-          after(() =>
-            sendDelayedAcknowledgement({
-              merchantId,
-              conversationId,
-              inboundMessageId: savedMessage.id,
-              inboundCreatedAt: savedMessage.created_at,
-              chatId: parsed.chatId,
-              instagramUserId: settings.instagram_user_id!,
-              accessToken: settings.instagram_access_token!,
-              template: settings.ai_acknowledge_template!,
-              delaySeconds: settings.ai_ack_delay_seconds ?? 12,
-            })
-          );
+          if (executionBackend === "queue") {
+            try {
+              await enqueueAcknowledgementFallback(
+                supabase,
+                savedMessage.id,
+                settings.ai_ack_delay_seconds ?? 12
+              );
+            } catch (ackQueueError) {
+              console.error(
+                "[Instagram Webhook] acknowledgement enqueue failed:",
+                ackQueueError
+              );
+            }
+          } else {
+            after(() =>
+              sendDelayedAcknowledgement({
+                merchantId,
+                conversationId,
+                inboundMessageId: savedMessage.id,
+                inboundCreatedAt: savedMessage.created_at,
+                chatId: parsed.chatId,
+                instagramUserId: settings.instagram_user_id!,
+                accessToken: settings.instagram_access_token!,
+                template: settings.ai_acknowledge_template!,
+                delaySeconds: settings.ai_ack_delay_seconds ?? 12,
+              })
+            );
+          }
         }
 
         // Trigger AI pipeline in background (text messages with content only)
         if (savedMessage && parsed.text && parsed.messageType === "text") {
-          after(() =>
-            processInboundMessage({
-              messageId: savedMessage.id,
-              merchantId,
-              conversationId,
-              customerId: customer.id,
-              content: parsed.text,
-              chatId: parsed.chatId,
-              platform: "instagram",
-              credentials: {
-                igUserId: settings.instagram_user_id!,
-                accessToken: settings.instagram_access_token!,
-              },
-              messageCreatedAt: savedMessage.created_at,
-            })
-          );
+          if (executionBackend === "queue") {
+            try {
+              await enqueueInboundAI(supabase, savedMessage.id, 8);
+            } catch (queueError) {
+              console.error("[Instagram Webhook] AI enqueue failed:", queueError);
+              await supabase.from("flags").insert({
+                merchant_id: merchantId,
+                conversation_id: conversationId,
+                message_id: savedMessage.id,
+                priority: "critical",
+                category: "ai_unavailable",
+                title: "AI message queue unavailable",
+                description:
+                  "The inbound message was saved, but durable AI processing could not be queued.",
+                recommended_action:
+                  "Review the customer message manually and retry after queue health is restored.",
+              });
+            }
+          } else {
+            after(() =>
+              processInboundMessage({
+                messageId: savedMessage.id,
+                merchantId,
+                conversationId,
+                customerId: customer.id,
+                content: parsed.text,
+                chatId: parsed.chatId,
+                platform: "instagram",
+                credentials: {
+                  igUserId: settings.instagram_user_id!,
+                  accessToken: settings.instagram_access_token!,
+                },
+                messageCreatedAt: savedMessage.created_at,
+                executionMode: "inline",
+              })
+            );
+          }
         }
       }
     }
