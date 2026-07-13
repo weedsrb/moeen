@@ -33,5 +33,16 @@ export async function runAutomationSchedule(
     if (error) throw new Error(error.message);
     return data as ScheduleResult;
   }
+  if (workflowType === "inventory-alerts") {
+    // Inventory notifications/jobs are created synchronously only when the
+    // available-stock state crosses healthy/low/out boundaries.
+    return {
+      workflowType,
+      scanned: 0,
+      notificationsUpserted: 0,
+      jobsUpserted: 0,
+      dryRun,
+    };
+  }
   throw new Error(`Schedule not implemented yet: ${workflowType}`);
 }
