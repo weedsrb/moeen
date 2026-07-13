@@ -87,6 +87,46 @@ export const geminiResponseSchema = z.object({
 export type GeminiResponse = z.infer<typeof geminiResponseSchema>;
 export type GeminiItem = z.infer<typeof geminiItemSchema>;
 
+// --- Provider-neutral model output (prompt v5+) ---
+
+const assistantOrderPatchSchema = z.object({
+  add_or_update_items: z
+    .array(
+      z.object({
+        product_id: z.string(),
+        quantity: z.number().int().positive(),
+        variant: z.string().nullable().optional(),
+      })
+    )
+    .optional(),
+  remove_product_ids: z.array(z.string()).optional(),
+  customer_name: z.string().min(1).optional(),
+  phone: z.string().min(1).optional(),
+  delivery_address: z.string().min(1).optional(),
+});
+
+export const assistantTurnV1Schema = z.object({
+  intent: z.enum(["order", "question", "conversation"]),
+  dialogue_act: z.enum([
+    "answer",
+    "ask_field",
+    "readback",
+    "confirm",
+    "adjust_order",
+    "cancel",
+    "handoff",
+    "acknowledge",
+  ]),
+  reply: z.string().nullable(),
+  needs_human: z.boolean(),
+  requested_field: z.string().nullable(),
+  order_patch: assistantOrderPatchSchema,
+  fact_refs: z.array(z.string()),
+  uncertainty_codes: z.array(z.string()),
+});
+
+export type AssistantTurnV1 = z.infer<typeof assistantTurnV1Schema>;
+
 // --- Pipeline Input ---
 
 export interface PipelineInput {
@@ -106,6 +146,8 @@ export interface PipelineInput {
   /** Skip burst debounce (sleep + successor check + gather). Set by the
    *  reprocess endpoint, which runs inline on a single historical message. */
   skipDebounce?: boolean;
+  /** Queue deliveries are already delayed, so gather/check ownership without sleeping. */
+  executionMode?: "inline" | "queue";
 }
 
 // --- Compressed Catalog ---
@@ -119,11 +161,75 @@ export interface CompressedProduct {
   stock: number;
 }
 
+// --- Provider-neutral compact request contract ---
+
+export interface AIRequestV1 {
+  v: 1;
+  business: {
+    name: string;
+    currency: string;
+    tone: string;
+    reply_language: string;
+    required_customer_fields: Array<"delivery_address" | "name" | "phone">;
+  };
+  admin_policy: {
+    assistant_name: string | null;
+    greeting: string | null;
+    business_context: string | null;
+    custom_instructions: string | null;
+  };
+  customer: {
+    name: string | null;
+    phone: string | null;
+    known_address: string | null;
+    language: "ar" | "en" | "mixed" | "unknown";
+  };
+  conversation: {
+    mode: "ai" | "human_takeover";
+    summary: string;
+    awaiting: "confirmation" | "field" | null;
+  };
+  order: {
+    id: string | null;
+    items: Array<{
+      product_id: string | null;
+      name: string;
+      quantity: number;
+      variant: string | null;
+      unit_price: number;
+    }>;
+    delivery_address: string | null;
+    total: number;
+    missing: string[];
+    last_readback: string | null;
+  };
+  facts: {
+    products: CompressedProduct[];
+    faqs: Array<{ question: string; answer: string }>;
+  };
+  recent: Array<{
+    role: "customer" | "assistant" | "merchant" | "system";
+    text: string;
+  }>;
+  current: {
+    message_ids: string[];
+    text: string;
+  };
+}
+
 // --- Context Assembly Output ---
 
 export interface AssembledContext {
+  /** Compact, versioned input passed to the full conversation model. */
+  aiRequest: AIRequestV1;
   conversationHistory: string;
   catalog: CompressedProduct[];
+  customerContext: string;
+  customerProfile: {
+    name: string | null;
+    phone: string | null;
+    deliveryAddress: string | null;
+  };
   settings: {
     confidenceThreshold: number;
     autoClarity: boolean;
@@ -137,6 +243,10 @@ export interface AssembledContext {
     responseLanguage: string;
     autoAcknowledge: boolean;
     acknowledgeTemplate: string | null;
+    requireCustomerName: boolean;
+    requireCustomerPhone: boolean;
+    acknowledgementMode: "off" | "delayed";
+    acknowledgementDelaySeconds: number;
   };
   merchantContext: string;
   lastOutboundSenderType: SenderType | null;

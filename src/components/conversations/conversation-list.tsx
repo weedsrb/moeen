@@ -8,7 +8,7 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
-import { MessageSquare } from "lucide-react";
+import { MessageSquare, UserRound } from "lucide-react";
 import type { Conversation, Customer } from "@/types/message";
 import type { OrderStatus } from "@/types/order";
 
@@ -43,14 +43,24 @@ function formatRelativeTime(dateStr: string | null): string {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+/**
+ * Deliberately avoids `String.prototype.toUpperCase()` on the whole name:
+ * Node's server-side ICU and the browser's ICU can map some non-Latin code
+ * points (Arabic in particular) to different output, which produces a
+ * server/client text mismatch and a hydration error. Only ASCII letters are
+ * uppercased; other scripts (which have no case) pass through untouched and
+ * render identically everywhere. `Array.from` (not `w[0]`) picks a full
+ * grapheme instead of slicing a UTF-16 code unit in half.
+ */
 function getInitials(name: string | null): string {
   if (!name) return "?";
-  return name
-    .split(" ")
-    .map((w) => w[0])
-    .join("")
-    .toUpperCase()
-    .slice(0, 2);
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return "?";
+  const chars =
+    words.length === 1
+      ? Array.from(words[0]).slice(0, 2)
+      : words.slice(0, 2).map((w) => Array.from(w)[0] ?? "");
+  return chars.join("").replace(/[a-z]/g, (c) => c.toUpperCase());
 }
 
 export function ConversationList({
@@ -130,6 +140,12 @@ export function ConversationList({
                       </Badge>
                     )}
                   </div>
+                  {conversation.automation_mode === "human_takeover" && (
+                    <div className="mt-1 flex items-center gap-1 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+                      <UserRound className="h-3 w-3" />
+                      Human takeover
+                    </div>
+                  )}
                 </div>
               </ContextMenuTrigger>
               <ContextMenuContent>

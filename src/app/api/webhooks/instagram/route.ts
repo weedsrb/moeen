@@ -6,11 +6,92 @@ import {
   rehostInstagramAudio,
 } from "@/lib/messaging/rehost-media";
 import { processInboundMessage } from "@/lib/ai/process";
+import {
+  enqueueAcknowledgementFallback,
+  enqueueInboundAI,
+  getAIExecutionBackend,
+} from "@/lib/ai/queue";
 import type { InstagramWebhookPayload } from "@/types/instagram";
 
 // The AI pipeline now debounces bursts (sleeps ~8s) before calling Gemini
 // (with a retry) inside after(). Give the function headroom on Vercel.
 export const maxDuration = 60;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function sendDelayedAcknowledgement(params: {
+  merchantId: string;
+  conversationId: string;
+  inboundMessageId: string;
+  inboundCreatedAt: string;
+  chatId: string;
+  instagramUserId: string;
+  accessToken: string;
+  template: string;
+  delaySeconds: number;
+}): Promise<void> {
+  await delay(params.delaySeconds * 1_000);
+  const supabase = createAdminClient();
+
+  const [controlResult, responseResult] = await Promise.all([
+    supabase
+      .from("conversations")
+      .select("automation_mode")
+      .eq("id", params.conversationId)
+      .eq("merchant_id", params.merchantId)
+      .single(),
+    supabase
+      .from("messages")
+      .select("id")
+      .eq("conversation_id", params.conversationId)
+      .eq("direction", "outbound")
+      .gt("created_at", params.inboundCreatedAt)
+      .limit(1)
+      .maybeSingle(),
+  ]);
+
+  if (
+    controlResult.error ||
+    controlResult.data?.automation_mode !== "ai" ||
+    responseResult.error ||
+    responseResult.data
+  ) {
+    return;
+  }
+
+  const provider = new InstagramProvider(
+    params.instagramUserId,
+    params.accessToken
+  );
+  const result = await provider.sendMessage(params.chatId, params.template);
+  if (!result.success) return;
+
+  await supabase.from("messages").insert({
+    merchant_id: params.merchantId,
+    conversation_id: params.conversationId,
+    platform_message_id: result.messageId ?? null,
+    direction: "outbound",
+    sender_type: "system",
+    content: params.template,
+    message_type: "text",
+    has_order_signal: false,
+    ai_processed: false,
+  });
+  await supabase
+    .from("conversations")
+    .update({
+      last_message_at: new Date().toISOString(),
+      last_message_preview: params.template.substring(0, 100),
+    })
+    .eq("id", params.conversationId)
+    .eq("merchant_id", params.merchantId);
+
+  console.log(
+    `[Instagram Webhook] delayed acknowledgement sent for ${params.inboundMessageId.slice(0, 8)}`
+  );
+}
 
 /**
  * Single app-level Instagram webhook endpoint (no [merchantId] in the path —
@@ -52,6 +133,7 @@ export async function POST(request: NextRequest) {
     }
 
     const supabase = createAdminClient();
+    const executionBackend = await getAIExecutionBackend(supabase);
 
     for (const entry of body.entry) {
       const igAccountId = entry.id;
@@ -62,7 +144,7 @@ export async function POST(request: NextRequest) {
       const { data: settings } = await supabase
         .from("merchant_settings")
         .select(
-          "merchant_id, instagram_connected, instagram_user_id, instagram_access_token, ai_auto_acknowledge, ai_acknowledge_template"
+          "merchant_id, instagram_connected, instagram_user_id, instagram_access_token, ai_acknowledge_template, ai_acknowledgement_mode, ai_ack_delay_seconds"
         )
         .eq("instagram_user_id", igAccountId)
         .maybeSingle();
@@ -229,31 +311,82 @@ export async function POST(request: NextRequest) {
             .eq("id", conversationId);
         }
 
-        // Auto-acknowledge: instant reply before AI processes (fire-and-forget)
-        if (settings.ai_auto_acknowledge && settings.ai_acknowledge_template) {
-          provider
-            .sendMessage(parsed.chatId, settings.ai_acknowledge_template)
-            .catch(() => {});
+        // Delayed fallback: send and persist only if no AI/merchant response
+        // arrived first and the conversation is still AI-owned.
+        if (
+          savedMessage &&
+          settings.ai_acknowledgement_mode === "delayed" &&
+          settings.ai_acknowledge_template
+        ) {
+          if (executionBackend === "queue") {
+            try {
+              await enqueueAcknowledgementFallback(
+                supabase,
+                savedMessage.id,
+                settings.ai_ack_delay_seconds ?? 12
+              );
+            } catch (ackQueueError) {
+              console.error(
+                "[Instagram Webhook] acknowledgement enqueue failed:",
+                ackQueueError
+              );
+            }
+          } else {
+            after(() =>
+              sendDelayedAcknowledgement({
+                merchantId,
+                conversationId,
+                inboundMessageId: savedMessage.id,
+                inboundCreatedAt: savedMessage.created_at,
+                chatId: parsed.chatId,
+                instagramUserId: settings.instagram_user_id!,
+                accessToken: settings.instagram_access_token!,
+                template: settings.ai_acknowledge_template!,
+                delaySeconds: settings.ai_ack_delay_seconds ?? 12,
+              })
+            );
+          }
         }
 
         // Trigger AI pipeline in background (text messages with content only)
         if (savedMessage && parsed.text && parsed.messageType === "text") {
-          after(() =>
-            processInboundMessage({
-              messageId: savedMessage.id,
-              merchantId,
-              conversationId,
-              customerId: customer.id,
-              content: parsed.text,
-              chatId: parsed.chatId,
-              platform: "instagram",
-              credentials: {
-                igUserId: settings.instagram_user_id!,
-                accessToken: settings.instagram_access_token!,
-              },
-              messageCreatedAt: savedMessage.created_at,
-            })
-          );
+          if (executionBackend === "queue") {
+            try {
+              await enqueueInboundAI(supabase, savedMessage.id, 8);
+            } catch (queueError) {
+              console.error("[Instagram Webhook] AI enqueue failed:", queueError);
+              await supabase.from("flags").insert({
+                merchant_id: merchantId,
+                conversation_id: conversationId,
+                message_id: savedMessage.id,
+                priority: "critical",
+                category: "ai_unavailable",
+                title: "AI message queue unavailable",
+                description:
+                  "The inbound message was saved, but durable AI processing could not be queued.",
+                recommended_action:
+                  "Review the customer message manually and retry after queue health is restored.",
+              });
+            }
+          } else {
+            after(() =>
+              processInboundMessage({
+                messageId: savedMessage.id,
+                merchantId,
+                conversationId,
+                customerId: customer.id,
+                content: parsed.text,
+                chatId: parsed.chatId,
+                platform: "instagram",
+                credentials: {
+                  igUserId: settings.instagram_user_id!,
+                  accessToken: settings.instagram_access_token!,
+                },
+                messageCreatedAt: savedMessage.created_at,
+                executionMode: "inline",
+              })
+            );
+          }
         }
       }
     }

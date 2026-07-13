@@ -1,137 +1,83 @@
 # Mo'een — معين
 
-> "The one who helps" — an order management platform for Palestinian and MENA small businesses.
+Mo'een is an Instagram-first order and conversation workspace for Palestinian and MENA small businesses. It turns natural Arabic, English, and mixed-language customer messages into validated order drafts while keeping the merchant in control.
 
-Mo'een intercepts customer messages on Telegram (and soon WhatsApp), uses AI to extract structured orders, and presents them in a clean merchant dashboard.
+## Current capabilities
 
-## What It Does
+- Instagram connection, inbound webhooks, durable message storage, media re-hosting, and merchant replies.
+- Multi-business accounts with isolated customers, catalogs, conversations, settings, and orders.
+- Catalog CRUD, spreadsheet import, stock tracking, and low-stock views.
+- Provider-neutral conversational order collection with compact context, deterministic catalog/stock/order validation, explicit prior-readback confirmation, human takeover, and privacy-conscious AI telemetry.
+- Durable Supabase AI queues and a standalone Muin worker with leases, retries, dead-letter handling, heartbeats, and a runtime rollback switch.
+- Realtime dashboard, notification center, conversations, order lifecycle, flags, inventory, and per-business AI/automation settings.
+- Five inactive merchant-automation n8n exports plus an OCI Always Free Docker/Traefik/PostgreSQL deployment stack.
 
-- Customer sends a message to your Telegram bot: *"بدي 3 كنافة"*
-- Mo'een captures it, detects the order intent, and extracts structured data via Gemini AI
-- The merchant sees a clean dashboard with order details, customer info, and conversation history
-- No spreadsheets, no missed messages, no chaos
+## Runtime architecture
 
-## Tech Stack
+The Instagram webhook persists each message, then uses a service-role-only runtime switch. `inline` retains the Next.js `after()` compatibility executor; `queue` sends only the message ID to Supabase Queues for `src/worker/index.ts`. Both paths share the compact-context, provider-neutral, deterministically validated pipeline in `src/lib/ai/`.
+
+Self-hosted n8n is isolated to merchant schedules and prepared Resend email jobs. It does not own prompts, order state, Instagram credentials, customer replies, or Supabase access. Repository exports remain inactive until the operations runbook is executed. See `docs/03_ARCHITECTURE.md`, `docs/06_N8N_WORKFLOWS.md`, `docs/07_AI_PIPELINE.md`, and `docs/10_AI_AUTOMATION_OPERATIONS.md`.
+
+## Stack
 
 | Layer | Technology |
-|-------|-----------|
-| Frontend | Next.js 16 (App Router), TypeScript strict |
-| Styling | Tailwind CSS v4 + shadcn/ui (base-ui) |
-| Animations | Framer Motion + GSAP |
-| Database | Supabase (PostgreSQL + Auth + Realtime + Storage) |
-| AI | Google Gemini 2.5 Flash |
-| Automation | n8n Cloud |
-| Messaging | Telegram Bot API (MVP), WhatsApp (Phase 2) |
-| Deployment | Vercel + Supabase Cloud |
+|---|---|
+| Web application | Next.js 16 App Router, React 19, strict TypeScript |
+| UI | Tailwind CSS v4, shadcn/ui, Base UI |
+| Data | Supabase PostgreSQL, Auth, Realtime, Storage |
+| AI | `AIProvider` adapter; Gemini is the initial provider |
+| Messaging | Provider abstraction; Instagram is the active provider |
+| Hosting | Vercel and Supabase Cloud |
+| Durable execution | Supabase Queues plus a dedicated TypeScript worker |
+| Merchant automation | Self-hosted n8n Community Edition and Resend |
 
-## Getting Started
-
-### 1. Clone & install
+## Local setup
 
 ```bash
-git clone https://github.com/weedsrb/moeen.git
-cd moeen
 npm install
-```
-
-### 2. Environment variables
-
-Copy `.env.example` to `.env.local` and fill in:
-
-```env
-NEXT_PUBLIC_SUPABASE_URL=        # From Supabase project settings
-NEXT_PUBLIC_SUPABASE_ANON_KEY=   # From Supabase project settings
-SUPABASE_SERVICE_ROLE_KEY=       # From Supabase project settings
-GEMINI_API_KEY=                  # From Google AI Studio
-NEXT_PUBLIC_APP_URL=             # Your deployment URL (or ngrok URL for local dev)
-```
-
-### 3. Database setup
-
-Run the SQL migrations **in order** in your Supabase SQL editor:
-
-```
-supabase/migrations/001_initial_schema.sql
-supabase/migrations/002_product_images_storage.sql
-supabase/migrations/003_stock_adjustments.sql
-supabase/migrations/004_telegram_webhook.sql
-```
-
-### 4. Supabase setup
-
-- **Auth**: Enable Email, Google OAuth, and Phone OTP providers
-- **Storage**: Verify the `product-images` bucket exists (created by migration 002)
-- **Realtime**: Enable for `conversations` and `messages` tables (Dashboard → Database → Replication)
-
-### 5. Run locally
-
-```bash
+cp .env.example .env.local
 npm run dev
 ```
 
-## Commands
+Required application variables:
+
+```env
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
+GEMINI_API_KEY=
+NEXT_PUBLIC_APP_URL=
+```
+
+Run every SQL file in `supabase/migrations/` in numeric order for a fresh database.
+
+## Validation commands
 
 ```bash
-npm run dev       # Dev server (Turbopack)
-npm run build     # Production build
-npm run lint      # ESLint check
-npm run start     # Production server
+npm run typecheck
+npm run lint
+npm test
+npm run test:eval
+npm run build
 ```
 
-## Architecture
+## Repository rules
 
-Three-layer system: **Next.js frontend** → **Next.js API routes** → **Supabase + n8n + Gemini**
+- Read the relevant guides in `node_modules/next/dist/docs/` before changing Next.js routes or conventions; this repository uses Next.js 16.
+- Persist inbound messages before triggering AI work.
+- Keep tenant data scoped by `merchant_id` and enforce ownership at the database and API layers.
+- Route provider communication through `src/lib/messaging/`.
+- Treat model output as a proposal. Prices, totals, stock, variants, confirmation, and state transitions are decided by application code.
+- Never place service-role, Gemini, Instagram, n8n, or email credentials in browser code or committed files.
 
-**Critical message flow:**
-```
-Customer Telegram message
-  → Telegram Bot API webhook
-  → /api/webhooks/telegram/[merchantId]
-  → Find/create customer + conversation
-  → Save message to Supabase
-  → Supabase Realtime push
-  → Dashboard updates live
-```
+## Documentation
 
-**Key rules:**
-- The app never calls Telegram/WhatsApp APIs directly — always through `MessagingProvider` (`src/lib/messaging/`)
-- Gemini is called only after a RegEx pre-filter detects an order signal (cost control)
-- All sensitive operations run server-side in `src/app/api/` routes
-- Multi-tenant via Row Level Security — every table has `merchant_id`, RLS enforced at DB level
-- Messages are never lost — always saved to Supabase before any processing
-
-**Route groups:**
-- `src/app/page.tsx` — landing page (no auth)
-- `src/app/(public)/` — login, signup
-- `src/app/(app)/` — dashboard, orders, conversations, inventory, flags, settings (auth required)
-- `src/app/api/` — API routes for webhooks, orders, products, messages, AI
-
-## Connecting Your Telegram Bot
-
-1. Open Telegram → search `@BotFather` → send `/newbot`
-2. Follow the prompts and copy the bot token
-3. Go to **Settings** in your Mo'een dashboard → paste the token → click **Connect**
-4. Mo'een automatically registers the webhook — messages will start appearing in real-time
-
-For local development, use [ngrok](https://ngrok.com) to expose localhost:
-
-```bash
-ngrok http 3000
-# Set NEXT_PUBLIC_APP_URL=https://your-subdomain.ngrok-free.app in .env.local
-```
-
-## Implementation Status
-
-| Phase | Status | Description |
-|-------|--------|-------------|
-| 0 — Project Setup | ✅ Complete | Next.js 16, TypeScript, Tailwind v4, Supabase, Framer Motion, GSAP |
-| 0.5 — Landing Page | ✅ Complete | GSAP animations, chaos→clarity hero, all sections |
-| 1 — Foundation | ✅ Complete | Auth (Google/email/OTP), DB schema (11 tables + RLS), app shell, onboarding |
-| 2 — Catalog & Inventory | ✅ Complete | Product CRUD, image upload, inventory page, stock adjustments, dashboard alerts |
-| 3 — Telegram Integration | ✅ Complete | Bot connection, webhook receiver, real-time conversations, send/receive messages |
-| 4 — AI Pipeline | 🔜 Next | Gemini 2.5 Flash order extraction, RegEx pre-filter, confidence thresholds |
-| 5 — Order Management | 🔜 Planned | Order CRUD, status workflow, order detail with chat context |
-| 6 — Automation (n8n) | 🔜 Planned | Full workflow automation, quiet hours, notification preferences |
+- `docs/03_ARCHITECTURE.md` — current runtime topology and ownership boundaries.
+- `docs/04_DATABASE_SCHEMA.md` — database reference.
+- `docs/06_N8N_WORKFLOWS.md` — implemented n8n boundaries, workflows, and protected API.
+- `docs/07_AI_PIPELINE.md` — current inline/worker AI flow, context, state, and provider contract.
+- `docs/10_AI_AUTOMATION_OPERATIONS.md` — deployment, cutover, rollback, monitoring, backup, and recovery.
+- `docs/09_INSTAGRAM.md` — Instagram integration details.
 
 ## License
 

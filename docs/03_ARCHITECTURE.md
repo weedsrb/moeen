@@ -1,312 +1,109 @@
-# Mo'een — System Architecture
+# Muin system architecture
 
-> This document describes how every component of Mo'een connects. It is the technical map that all implementation should follow.
+Status: repository implementation complete; external infrastructure activation
+is controlled by the operations runbook.
 
----
+## Runtime topology
 
-## Architecture Overview
+```text
+Instagram customer
+  -> Next.js webhook
+  -> Supabase messages
+  -> runtime switch
+     -> inline compatibility executor, or
+     -> Supabase AI queue -> dedicated Muin worker
+  -> AIProvider -> AssistantTurnV1
+  -> deterministic validation/reducer/order transition
+  -> Instagram response
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        MERCHANT (Browser)                       │
-│                   Next.js Frontend (TypeScript)                 │
-│            Tailwind + shadcn/ui + Framer Motion + GSAP          │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-                           │ HTTPS (API Routes + Supabase Client)
-                           │
-┌──────────────────────────▼──────────────────────────────────────┐
-│                      NEXT.JS API LAYER                          │
-│               Server-side routes + middleware                    │
-│                  Auth verification (Supabase)                   │
-└────┬─────────────────┬──────────────────┬───────────────────────┘
-     │                 │                  │
-     ▼                 ▼                  ▼
-┌─────────┐    ┌──────────────┐    ┌─────────────┐
-│ SUPABASE │    │   n8n CLOUD  │    │ GEMINI 2.5  │
-│          │    │              │    │   FLASH     │
-│ Database │◄──►│  Workflows   │───►│             │
-│ Auth     │    │  Webhooks    │    │ Intent      │
-│ Realtime │    │  Cron jobs   │    │ Extraction  │
-│ Storage  │    │              │    │ Reports     │
-└─────────┘    └──────┬───────┘    └─────────────┘
-                      │
-                      ▼
-          ┌───────────────────────┐
-          │  MESSAGING ABSTRACTION│
-          │       LAYER           │
-          ├───────────┬───────────┤
-          │ Telegram   │ WhatsApp  │
-          │ Bot API    │ (Phase 2) │
-          │ (MVP)      │           │
-          └───────────┴───────────┘
-                      │
-                      ▼
-              ┌───────────────┐
-              │   CUSTOMERS   │
-              │ (Telegram/WA) │
-              └───────────────┘
+Supabase domain event / n8n schedule
+  -> HMAC-protected Muin automation API
+  -> flags + dashboard notifications + prepared automation jobs
+  -> n8n claims email job -> Resend -> n8n reports result
 ```
 
----
+## Ownership
 
-## Component Responsibilities
+| Component | Owns | Must not own |
+|---|---|---|
+| Next.js | Webhooks, authenticated APIs, dashboard, validation boundaries, inline rollback executor | Scheduled operational orchestration |
+| Supabase | Source-of-truth data, RLS, queues, outbox jobs, idempotency, deterministic scans | Prompt behavior |
+| Muin worker | Durable conversation execution, provider calls, validated customer replies | Merchant email schedules |
+| n8n | Merchant schedules, prepared-email delivery, execution retry/reporting | Prompts, customer DMs, order mutations, Supabase/Instagram credentials |
+| AI provider | Language interpretation, response wording, proposed order patch | Prices, totals, stock truth, confirmation authority, actions, database writes |
+| Merchant | Business policy, catalog/facts, takeover/resume, operational decisions | Overriding core safety and deterministic invariants |
 
-### 1. Next.js Frontend
-**What it does:** Renders the merchant-facing UI — dashboard, orders, inventory, flags, settings, landing page.
-**Talks to:** Supabase (directly via client library for reads + realtime), Next.js API routes (for writes and business logic).
-**Key decisions:**
-- App Router (Next.js 14+) for file-based routing
-- Server Components for initial page loads (fast)
-- Client Components for interactive elements (realtime, animations)
-- Supabase Realtime subscriptions for live dashboard updates
+## Customer conversation path
 
-### 2. Next.js API Layer
-**What it does:** Handles business logic that shouldn't run in the browser — order creation, status changes, webhook processing, Gemini calls.
-**Talks to:** Supabase (server-side with service role key for admin operations), n8n (triggering workflows), Gemini (AI processing).
-**Key decisions:**
-- API routes live in `app/api/` directory
-- All routes verify auth via Supabase session
-- Sensitive operations (inventory math, status transitions) happen server-side to prevent race conditions
+`src/app/api/webhooks/instagram/route.ts` verifies Meta requests and persists an
+inbound message before dispatch. `ai_runtime_settings.ai_execution_backend`
+selects `inline` or `queue`:
 
-### 3. Supabase
-**What it does:** Everything data.
-- **PostgreSQL Database:** All tables — merchants, orders, products, customers, conversations, messages, flags, inventory
-- **Auth:** Merchant sign-up and login (Google, email, phone OTP)
-- **Row Level Security (RLS):** Every table filtered by `merchant_id` — data isolation enforced at database level
-- **Realtime:** WebSocket subscriptions for live dashboard updates when orders/messages change
-- **Storage:** Product images, merchant logos, uploaded files
-**Talks to:** Frontend (via Supabase client), API routes (via service role), n8n (via REST API or direct DB connection)
+- `inline` schedules `processInboundMessage()` through Next.js `after()` and is
+  retained for one rollback window.
+- `queue` sends only the message ID to Supabase Queues. `src/worker/index.ts`
+  re-fetches authoritative data and credentials, owns burst/lease/retry logic,
+  and calls the shared pipeline.
 
-### 4. n8n Cloud
-**What it does:** Rules engine and automation layer. Handles everything that's NOT AI — timer-based logic, threshold checks, status notifications, webhook processing.
-**Talks to:** Supabase (read/write data), Telegram API (via abstraction layer for sending messages), Gemini API (forwarding messages for AI processing).
-**Key decisions:**
-- Self-contained workflows — each workflow has a single trigger and clear purpose
-- n8n handles the message processing pipeline orchestration
-- Cron jobs for time-based checks (stale orders, customer wait time)
+`src/lib/ai/process.ts` assembles compact context, calls the provider-neutral
+adapter, runs the deterministic reducer/validators, persists the order/profile
+delta, sends one complete provider response, and records bounded telemetry.
 
-### 5. Gemini 2.5 Flash
-**What it does:** Language understanding only.
-- Detects order intent from Arabic, English, or Arabizi messages
-- Extracts product name, quantity, variant, delivery address from unstructured text
-- Matches customer descriptions to catalog products
-- Generates clarifying questions when data is missing
-- Generates structured JSON order drafts
-- Powers analytics reports and daily summaries
-**Talks to:** n8n (receives messages, returns structured data), Next.js API (for on-demand analytics)
-**Key decisions:**
-- Called ONLY when RegEx pre-filter detects a possible order signal
-- Returns structured JSON with confidence scores
-- Token optimization: compressed catalog, trimmed conversation history (last 5-6 messages)
-- Human always approves — Gemini suggests, merchant decides
+No order is promoted unless the draft is finalizable and confirmation refers
+to the latest prior AI readback. Human takeover suppresses both AI and delayed
+acknowledgements until manual resume.
 
-### 6. Messaging Abstraction Layer
-**What it does:** Provides a unified interface for all messaging operations regardless of the underlying platform.
-**Interface:**
-```typescript
-interface MessagingProvider {
-  sendMessage(chatId: string, text: string): Promise<MessageResult>
-  sendTemplateMessage(chatId: string, template: string, params: Record<string, string>): Promise<MessageResult>
-  receiveWebhook(payload: unknown): ParsedMessage
-  getConversationHistory(chatId: string, limit: number): Promise<Message[]>
-}
-```
-**Implementations:**
-- `TelegramProvider` — MVP, uses Telegram Bot API
-- `WhatsAppProvider` — Phase 2, uses third-party official API provider
-**Key decisions:**
-- The core application NEVER calls Telegram or WhatsApp APIs directly
-- All messaging goes through this interface
-- Switching providers = implementing a new class, no core app changes
-- Provider configuration stored in merchant settings (which platform, API keys)
+## Merchant automation path
 
----
+Muin creates flags, dashboard notifications, and prepared email jobs in its own
+database. n8n invokes only protected routes under
+`/api/internal/automation/`, using a five-minute HMAC request window and replay
+protection. It claims minimal email payloads, calls Resend with Muin's
+idempotency key, and reports completion/failure.
 
-## Data Flow: Message to Order
+Dashboard notifications are independent of n8n and Resend, so operational
+visibility survives OCI/email downtime. Daily summaries are deterministic and
+make no model call.
 
-This is the critical path — a customer message becoming a structured order on the dashboard.
+## Tenant and secret boundaries
 
-```
-1. Customer sends Telegram message
-   │
-2. Telegram delivers webhook to n8n
-   │
-3. n8n: Webhook Receiver workflow
-   ├── Saves raw message to Supabase (messages table)
-   ├── Runs RegEx pre-filter
-   │   ├── No order signal → STOP (message stored, no AI call)
-   │   └── Order signal detected → Continue
-   │
-4. n8n: Sends message + last 5 messages + compressed catalog to Gemini
-   │
-5. Gemini returns structured JSON:
-   {
-     "intent": "order",
-     "confidence": 0.87,
-     "items": [
-       { "product_match": "product_id_123", "quantity": 3, "variant": "large" }
-     ],
-     "customer_info": { "name": "أحمد", "address": "نابلس، شارع..." },
-     "missing_fields": [],
-     "clarifying_question": null
-   }
-   │
-6. n8n: Processes Gemini response
-   ├── Confidence >= threshold → Create order draft in Supabase (status: Incoming)
-   ├── Confidence < threshold → Create order draft + create Flag (AI low confidence)
-   ├── Missing fields → Send clarifying question via Telegram (AI drafts, auto-sends)
-   │   └── But if confidence is very low → Flag for human instead of auto-asking
-   └── Gemini unreachable → Save message, create Flag (AI unavailable, manual review)
-   │
-7. Supabase Realtime notifies frontend
-   │
-8. Merchant sees new order on dashboard
-   ├── Reviews AI extraction
-   ├── Corrects if needed
-   └── Confirms → triggers status change → n8n sends confirmation to customer
-```
+- Browser data is tenant-scoped by Supabase sessions/RLS and `merchant_id`.
+- Service-role, provider, and channel credentials stay in server/worker
+  environments.
+- n8n has a Muin HMAC credential and Resend key only.
+- The worker and n8n use separate environment files/containers.
+- Staging uses a separate n8n database, encryption key, Muin deployment/HMAC
+  key, Resend key, and sender.
+- Full prompts, raw customer transcripts, and secrets are not stored in AI
+  telemetry.
+- Merchant/customer text is treated as untrusted data and cannot override
+  system rules, output schema, or actions.
 
----
+## Authoritative files
 
-## Data Flow: Gemini Failure Handling
+- AI flow: `docs/07_AI_PIPELINE.md`
+- n8n flow: `docs/06_N8N_WORKFLOWS.md`
+- Operations: `docs/10_AI_AUTOMATION_OPERATIONS.md`
+- Instagram: `src/app/api/webhooks/instagram/route.ts`
+- AI orchestration: `src/lib/ai/process.ts`
+- AI worker: `src/worker/index.ts`
+- Compact context: `src/lib/ai/context.ts`
+- Provider/output: `src/lib/ai/provider.ts`, `src/lib/ai/gemini.ts`
+- State and facts: `src/lib/ai/dialogue-state.ts`,
+  `src/lib/ai/validate-extraction.ts`, `src/lib/ai/confirmation.ts`
+- Automation APIs: `src/app/api/internal/automation/`
+- Workflow exports: `n8n/workflows/`
+- Free OCI stack: `infra/n8n/`
+- Database history: `supabase/migrations/`
 
-```
-Gemini API call fails (timeout, error, rate limit)
-   │
-   ├── n8n retries once after 5 seconds
-   │   ├── Success → continue normal flow
-   │   └── Failure → continue below
-   │
-   ├── Message remains stored in Supabase (never lost)
-   ├── Flag created: category "ai_unavailable", priority "medium"
-   ├── If multiple failures in 5 minutes → Dashboard banner: "AI processing paused"
-   └── When Gemini recovers → n8n can optionally reprocess queued messages
-       (configurable — merchant may have already handled them manually)
-```
+## Deployment topology
 
----
+- Next.js application: Vercel-compatible deployment.
+- Database/Auth/Realtime/Storage/Queues: Supabase.
+- Initial AI provider: Gemini behind `AIProvider`.
+- Messaging: Instagram Graph API behind `MessagingProvider`.
+- Worker/n8n: separate containers on one OCI Always Free VM, with Traefik and a
+  PostgreSQL database dedicated to n8n.
 
-## Authentication Flow
-
-```
-Merchant visits Mo'een
-   │
-   ├── Not authenticated → Redirect to /login
-   │   ├── Google sign-in → Supabase Auth → Session created
-   │   ├── Email + password → Supabase Auth → Session created
-   │   └── Phone OTP → Supabase Auth → Session created
-   │
-   ├── Authenticated, no business profile → Redirect to /onboarding
-   │
-   └── Authenticated + business profile → Dashboard
-```
-
-**Session management:**
-- Supabase handles JWT tokens and refresh
-- Next.js middleware checks auth on every protected route
-- API routes verify session before processing
-
----
-
-## Deployment Architecture (MVP)
-
-| Component | Hosting | Cost (MVP) |
-|-----------|---------|------------|
-| Next.js Frontend + API | Vercel (free tier) | $0 |
-| Supabase | Supabase Cloud (free tier) | $0 |
-| n8n | n8n Cloud (starter) | ~$20/month |
-| Gemini 2.5 Flash | Google AI (free tier: 250 req/day) | $0 |
-| Telegram Bot API | Free | $0 |
-| Domain | Custom domain | ~$12/year |
-| **Total MVP cost** | | **~$21/month** |
-
-**Scaling notes:**
-- Vercel free tier: 100GB bandwidth, sufficient for MVP
-- Supabase free tier: 500MB database, 50MB storage, 50K auth users
-- Gemini free tier: 250 requests/day — sufficient for 3-5 pilot merchants
-- When scaling beyond free tiers, costs are predictable and gradual
-
----
-
-## Security Considerations
-
-- **RLS enforced at database level** — even if application code has bugs, merchants can't see each other's data
-- **API keys stored as environment variables** — never in client-side code
-- **Telegram Bot Token stored in Supabase** — encrypted at rest, accessed only server-side
-- **Gemini API calls made server-side only** — never from the browser
-- **Input validation** — all user inputs sanitized before database writes
-- **HTTPS everywhere** — Vercel provides SSL by default
-
----
-
-## File Structure (Next.js Project)
-
-```
-moeen/
-├── app/
-│   ├── (public)/              # Public routes (no auth required)
-│   │   ├── page.tsx           # Landing page
-│   │   ├── login/page.tsx     # Login
-│   │   └── signup/page.tsx    # Sign up
-│   ├── (app)/                 # Protected routes (auth required)
-│   │   ├── layout.tsx         # App shell with sidebar/nav
-│   │   ├── dashboard/page.tsx
-│   │   ├── orders/
-│   │   │   ├── page.tsx       # Order board/list
-│   │   │   └── [id]/page.tsx  # Order detail (split view)
-│   │   ├── inventory/
-│   │   │   ├── page.tsx       # Product list
-│   │   │   └── [id]/page.tsx  # Product detail
-│   │   ├── flags/page.tsx     # Flags & escalations
-│   │   ├── settings/page.tsx  # Settings
-│   │   └── onboarding/        # Onboarding wizard
-│   │       └── page.tsx
-│   └── api/                   # API routes
-│       ├── webhooks/
-│       │   └── telegram/route.ts  # Telegram webhook receiver
-│       ├── orders/route.ts
-│       ├── products/route.ts
-│       ├── ai/
-│       │   └── process/route.ts   # Gemini processing endpoint
-│       └── instagram/
-│           └── import/route.ts    # Instagram catalog import
-├── components/
-│   ├── ui/                    # shadcn/ui components
-│   ├── layout/                # Sidebar, TopBar, MobileNav
-│   ├── orders/                # OrderCard, OrderBoard, OrderDetail
-│   ├── inventory/             # ProductCard, StockBar, ProductForm
-│   ├── flags/                 # FlagCard, PriorityBadge
-│   ├── dashboard/             # KPICard, QuickActions, ActivitySnapshot
-│   ├── onboarding/            # Step components
-│   └── chat/                  # ChatThread, MessageBubble, ReplyInput
-├── lib/
-│   ├── supabase/
-│   │   ├── client.ts          # Browser Supabase client
-│   │   ├── server.ts          # Server Supabase client
-│   │   └── types.ts           # Generated database types
-│   ├── messaging/
-│   │   ├── interface.ts       # MessagingProvider interface
-│   │   ├── telegram.ts        # TelegramProvider implementation
-│   │   └── whatsapp.ts        # WhatsAppProvider (Phase 2)
-│   ├── ai/
-│   │   ├── gemini.ts          # Gemini API client
-│   │   ├── prompts.ts         # AI prompt templates
-│   │   └── regex-filter.ts    # Pre-filter for order signals
-│   └── utils/
-│       ├── inventory.ts       # Inventory math helpers
-│       └── order-lifecycle.ts # Status transition logic
-├── hooks/                     # Custom React hooks
-│   ├── useRealtimeOrders.ts
-│   ├── useRealtimeFlags.ts
-│   └── useRealtimeInventory.ts
-├── types/                     # TypeScript type definitions
-│   ├── order.ts
-│   ├── product.ts
-│   ├── merchant.ts
-│   ├── message.ts
-│   └── flag.ts
-├── public/                    # Static assets
-├── styles/                    # Global styles, Tailwind config
-└── docs/                      # These documentation files
-```
+The repository defaults to the inline executor and inactive n8n exports. No
+external cutover occurs merely by merging application code.

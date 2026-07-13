@@ -1,0 +1,189 @@
+name: muin-automation
+
+x-n8n-environment: &n8n-environment
+  DB_TYPE: postgresdb
+  DB_POSTGRESDB_HOST: postgres
+  DB_POSTGRESDB_PORT: 5432
+  DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME:?set N8N_DB_NAME}
+  DB_POSTGRESDB_USER: ${N8N_DB_USER:?set N8N_DB_USER}
+  DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:?set N8N_DB_PASSWORD}
+  N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?set N8N_ENCRYPTION_KEY}
+  N8N_HOST: ${N8N_HOST:?set N8N_HOST}
+  N8N_PROTOCOL: https
+  N8N_PORT: 5678
+  WEBHOOK_URL: https://${N8N_HOST}/
+  N8N_PROXY_HOPS: 1
+  GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Asia/Hebron}
+  TZ: ${GENERIC_TIMEZONE:-Asia/Hebron}
+  EXECUTIONS_MODE: regular
+  EXECUTIONS_DATA_PRUNE: "true"
+  EXECUTIONS_DATA_MAX_AGE: ${N8N_EXECUTION_MAX_AGE_HOURS:-168}
+  EXECUTIONS_DATA_SAVE_ON_SUCCESS: none
+  EXECUTIONS_DATA_SAVE_ON_ERROR: all
+  EXECUTIONS_DATA_SAVE_ON_PROGRESS: "false"
+  N8N_DIAGNOSTICS_ENABLED: "false"
+  N8N_PERSONALIZATION_ENABLED: "false"
+  N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+  # Required only by the reviewed signing Code nodes in versioned Muin exports.
+  # The host is single-admin; never import untrusted workflows.
+  N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+  NODE_FUNCTION_ALLOW_BUILTIN: crypto
+  MUIN_APP_BASE_URL: ${MUIN_APP_BASE_URL:?set MUIN_APP_BASE_URL}
+  MUIN_AUTOMATION_HMAC_KEY_ID: ${MUIN_AUTOMATION_HMAC_KEY_ID:?set MUIN_AUTOMATION_HMAC_KEY_ID}
+  MUIN_AUTOMATION_HMAC_SECRET: ${MUIN_AUTOMATION_HMAC_SECRET:?set MUIN_AUTOMATION_HMAC_SECRET}
+  RESEND_API_KEY: ${RESEND_API_KEY:?set RESEND_API_KEY}
+  RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:?set RESEND_FROM_EMAIL}
+  N8N_SECURE_COOKIE: "true"
+
+services:
+  traefik:
+    image: traefik:v3.5.4
+    restart: unless-stopped
+    command:
+      - --api.dashboard=false
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:?set ACME_EMAIL}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+      - --ping=true
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_letsencrypt:/letsencrypt
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [proxy]
+
+  postgres:
+    image: postgres:16.10-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${N8N_DB_NAME:?set N8N_DB_NAME}
+      POSTGRES_USER: ${N8N_DB_USER:?set N8N_DB_USER}
+      POSTGRES_PASSWORD: ${N8N_DB_PASSWORD:?set N8N_DB_PASSWORD}
+    volumes:
+      - n8n_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.29.10
+    restart: unless-stopped
+    environment: *n8n-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ../../n8n/workflows:/exports
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5678/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.n8n.rule=Host(`${N8N_HOST}`)
+      - traefik.http.routers.n8n.entrypoints=websecure
+      - traefik.http.routers.n8n.tls.certresolver=letsencrypt
+      - traefik.http.services.n8n.loadbalancer.server.port=5678
+    networks: [proxy, internal]
+
+  muin-worker:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    env_file:
+      - .env.worker
+    environment:
+      AI_WORKER_CONCURRENCY: ${AI_WORKER_CONCURRENCY:-3}
+      AI_WORKER_POLL_MS: ${AI_WORKER_POLL_MS:-1000}
+      AI_WORKER_VISIBILITY_SECONDS: ${AI_WORKER_VISIBILITY_SECONDS:-90}
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"process.kill(1,0)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [internal, egress]
+
+  postgres-staging:
+    profiles: [staging]
+    image: postgres:16.10-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${N8N_STAGING_DB_NAME:-n8n_staging}
+      POSTGRES_USER: ${N8N_STAGING_DB_USER:-n8n_staging}
+      POSTGRES_PASSWORD: ${N8N_STAGING_DB_PASSWORD:?set N8N_STAGING_DB_PASSWORD}
+    volumes:
+      - n8n_staging_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  n8n-staging:
+    profiles: [staging]
+    image: docker.n8n.io/n8nio/n8n:2.29.10
+    restart: unless-stopped
+    environment:
+      <<: *n8n-environment
+      DB_POSTGRESDB_HOST: postgres-staging
+      DB_POSTGRESDB_DATABASE: ${N8N_STAGING_DB_NAME:-n8n_staging}
+      DB_POSTGRESDB_USER: ${N8N_STAGING_DB_USER:-n8n_staging}
+      DB_POSTGRESDB_PASSWORD: ${N8N_STAGING_DB_PASSWORD:?set N8N_STAGING_DB_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_STAGING_ENCRYPTION_KEY:?set N8N_STAGING_ENCRYPTION_KEY}
+      N8N_HOST: ${N8N_STAGING_HOST:?set N8N_STAGING_HOST}
+      WEBHOOK_URL: https://${N8N_STAGING_HOST}/
+      MUIN_APP_BASE_URL: ${MUIN_STAGING_APP_BASE_URL:?set MUIN_STAGING_APP_BASE_URL}
+      MUIN_AUTOMATION_HMAC_KEY_ID: ${MUIN_STAGING_AUTOMATION_HMAC_KEY_ID:?set MUIN_STAGING_AUTOMATION_HMAC_KEY_ID}
+      MUIN_AUTOMATION_HMAC_SECRET: ${MUIN_STAGING_AUTOMATION_HMAC_SECRET:?set MUIN_STAGING_AUTOMATION_HMAC_SECRET}
+      RESEND_API_KEY: ${RESEND_STAGING_API_KEY:?set RESEND_STAGING_API_KEY}
+      RESEND_FROM_EMAIL: ${RESEND_STAGING_FROM_EMAIL:?set RESEND_STAGING_FROM_EMAIL}
+    depends_on:
+      postgres-staging:
+        condition: service_healthy
+    volumes:
+      - n8n_staging_data:/home/node/.n8n
+      - ../../n8n/workflows:/exports:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5678/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.n8n-staging.rule=Host(`${N8N_STAGING_HOST}`)
+      - traefik.http.routers.n8n-staging.entrypoints=websecure
+      - traefik.http.routers.n8n-staging.tls.certresolver=letsencrypt
+      - traefik.http.services.n8n-staging.loadbalancer.server.port=5678
+    networks: [proxy, internal]
+
+volumes:
+  traefik_letsencrypt:
+  n8n_postgres:
+  n8n_data:
+  n8n_staging_postgres:
+  n8n_staging_data:
+
+networks:
+  proxy:
+  egress:
+  internal:
+    internal: true

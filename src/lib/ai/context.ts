@@ -1,6 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { SenderType } from "@/types/message";
-import type { AssembledContext, CompressedProduct } from "./types";
+import type {
+  AIRequestV1,
+  AssembledContext,
+  CompressedProduct,
+} from "./types";
+import type { CollectionState } from "./order-creator";
+import { canAcceptConfirmation } from "./confirmation";
 
 /**
  * assembleContext's return type, augmented with the conversation's open
@@ -19,6 +25,10 @@ export interface AssembledContextWithOrder extends AssembledContext {
   /** The open `collecting` order's id, or null — so the pipeline can upsert /
    *  promote it without re-querying. */
   collectingOrderId: string | null;
+  /** Persisted working state for confirmation and customer-detail continuity. */
+  collectionState: CollectionState | null;
+  /** True only when a persisted pending readback is the latest AI outbound. */
+  canAcceptConfirmation: boolean;
 }
 
 /** Shape of the open collecting order row (untyped client → cast locally). */
@@ -28,8 +38,10 @@ interface CollectingOrderRow {
   subtotal: number | null;
   total: number | null;
   currency: string | null;
+  ai_collection_state: CollectionState | null;
   order_items:
     | Array<{
+        product_id: string | null;
         product_name: string;
         variant: string | null;
         quantity: number;
@@ -38,6 +50,16 @@ interface CollectingOrderRow {
       }>
     | null;
 }
+
+interface StableMerchantCacheValue {
+  expiresAt: number;
+  settings: Record<string, unknown> | null;
+  merchant: { business_name: string | null } | null;
+  faq: Array<{ question: string; answer: string; display_order: number }>;
+}
+
+const STABLE_CONTEXT_TTL_MS = 5 * 60_000;
+const stableMerchantCache = new Map<string, StableMerchantCacheValue>();
 
 /**
  * Assemble the full context needed for a Gemini API call:
@@ -52,8 +74,14 @@ export async function assembleContext(
   supabase: SupabaseClient,
   merchantId: string,
   conversationId: string,
-  messageContent: string
+  customerId: string,
+  messageContent: string,
+  excludeMessageIds: string[] = []
 ): Promise<AssembledContextWithOrder> {
+  const cachedStable = stableMerchantCache.get(merchantId);
+  const hasFreshStableCache =
+    cachedStable !== undefined && cachedStable.expiresAt > Date.now();
+
   // Fetch in parallel: messages, products, settings, business name, FAQ, and
   // the single open collecting order (+ its items) for this conversation.
   const [
@@ -63,13 +91,16 @@ export async function assembleContext(
     merchantResult,
     faqResult,
     collectingResult,
+    customerResult,
+    conversationResult,
+    aiStateResult,
   ] = await Promise.all([
       supabase
         .from("messages")
-        .select("content, direction, sender_type")
+        .select("id, content, direction, sender_type, created_at")
         .eq("conversation_id", conversationId)
         .order("created_at", { ascending: false })
-        .limit(6),
+        .limit(40),
 
       supabase
         .from("products")
@@ -79,28 +110,34 @@ export async function assembleContext(
         .eq("merchant_id", merchantId)
         .eq("is_active", true),
 
-      supabase
-        .from("merchant_settings")
-        .select("ai_confidence_threshold, ai_auto_clarify, ai_handoff_message, ai_persona_name, ai_tone, ai_greeting, ai_business_context, ai_custom_instructions, ai_response_language, ai_auto_acknowledge, ai_acknowledge_template")
-        .eq("merchant_id", merchantId)
-        .single(),
+      hasFreshStableCache
+        ? Promise.resolve({ data: cachedStable.settings, error: null })
+        : supabase
+            .from("merchant_settings")
+            .select("ai_confidence_threshold, ai_auto_clarify, ai_handoff_message, ai_persona_name, ai_tone, ai_greeting, ai_business_context, ai_custom_instructions, ai_response_language, ai_auto_acknowledge, ai_acknowledge_template, ai_require_customer_name, ai_require_customer_phone, ai_acknowledgement_mode, ai_ack_delay_seconds")
+            .eq("merchant_id", merchantId)
+            .single(),
 
-      supabase
-        .from("merchants")
-        .select("business_name")
-        .eq("id", merchantId)
-        .single(),
+      hasFreshStableCache
+        ? Promise.resolve({ data: cachedStable.merchant, error: null })
+        : supabase
+            .from("merchants")
+            .select("business_name")
+            .eq("id", merchantId)
+            .single(),
 
-      supabase
-        .from("merchant_faq")
-        .select("question, answer")
-        .eq("merchant_id", merchantId)
-        .order("display_order"),
+      hasFreshStableCache
+        ? Promise.resolve({ data: cachedStable.faq, error: null })
+        : supabase
+            .from("merchant_faq")
+            .select("question, answer, display_order")
+            .eq("merchant_id", merchantId)
+            .order("display_order"),
 
       supabase
         .from("orders")
         .select(
-          "id, delivery_address, subtotal, total, currency, order_items(product_name, variant, quantity, unit_price, subtotal)"
+          "id, delivery_address, subtotal, total, currency, ai_collection_state, order_items(product_id, product_name, variant, quantity, unit_price, subtotal)"
         )
         .eq("merchant_id", merchantId)
         .eq("conversation_id", conversationId)
@@ -108,10 +145,61 @@ export async function assembleContext(
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle(),
+
+      supabase
+        .from("customers")
+        .select("name, phone, delivery_address")
+        .eq("id", customerId)
+        .eq("merchant_id", merchantId)
+        .single(),
+
+      supabase
+        .from("conversations")
+        .select("automation_mode")
+        .eq("id", conversationId)
+        .eq("merchant_id", merchantId)
+        .single(),
+
+      supabase
+        .from("conversation_ai_state")
+        .select("summary, detected_language, last_summarized_message_id")
+        .eq("conversation_id", conversationId)
+        .maybeSingle(),
     ]);
 
+  const failures = [
+    ["messages", messagesResult.error],
+    ["products", productsResult.error],
+    ["settings", settingsResult.error],
+    ["merchant", merchantResult.error],
+    ["faq", faqResult.error],
+    ["collecting_order", collectingResult.error],
+    ["customer", customerResult.error],
+    ["conversation", conversationResult.error],
+    ["ai_state", aiStateResult.error],
+  ].filter((entry) => entry[1]);
+  if (failures.length > 0) {
+    const detail = failures
+      .map(([source, error]) => `${source}: ${(error as { message: string }).message}`)
+      .join("; ");
+    throw new Error(`AI context unavailable (${detail})`);
+  }
+
+  if (!hasFreshStableCache) {
+    stableMerchantCache.set(merchantId, {
+      expiresAt: Date.now() + STABLE_CONTEXT_TTL_MS,
+      settings: settingsResult.data,
+      merchant: merchantResult.data,
+      faq: faqResult.data ?? [],
+    });
+  }
+
   // --- Conversation history ---
-  const messages = (messagesResult.data ?? []).reverse(); // oldest first
+  const excludedIds = new Set(excludeMessageIds);
+  const allPreviousMessages = (messagesResult.data ?? [])
+    .filter((message) => !excludedIds.has(message.id))
+    .reverse();
+  const messages = allPreviousMessages.slice(-8); // oldest first, current burst excluded
   const conversationHistory = messages
     .map((msg) => {
       const label = senderLabel(msg.sender_type as SenderType, msg.direction as string);
@@ -129,28 +217,36 @@ export async function assembleContext(
   const rawProducts = productsResult.data ?? [];
   let products = rawProducts;
 
-  // If catalog is large, filter to products matching message words. Both the
+  const collectingOrder =
+    (collectingResult.data as CollectingOrderRow | null) ?? null;
+  const openProductIds = new Set(
+    (collectingOrder?.order_items ?? [])
+      .map((item) => item.product_id)
+      .filter((id): id is string => Boolean(id))
+  );
+
+  // Retrieve only product facts that are relevant to this turn. Both the
   // message tokens and the product name/alt-names are run through
   // normalizeForMatch first, so Arabic diacritics, alef/hamza/yaa/taa-marbuta
   // variants, and Arabizi punctuation/digit quirks don't silently drop real
   // matches. Matched AND fallback sets are capped so a broad match can't blow
   // the token budget with hundreds of products.
-  if (products.length > 50) {
-    const messageTokens = tokenize(normalizeForMatch(messageContent));
-    const matched = products.filter((p) => {
-      const productTokens = tokenize(
-        normalizeForMatch([p.name, ...(p.alternative_names ?? [])].join(" "))
-      );
-      return messageTokens.some((mt) =>
-        productTokens.some((pt) => tokensMatch(mt, pt))
-      );
-    });
-    // Cap matches; fall back to a bounded slice if the filter found nothing.
-    products =
-      matched.length > 0
-        ? matched.slice(0, MAX_FILTERED_PRODUCTS)
-        : rawProducts.slice(0, MAX_FILTERED_PRODUCTS);
-  }
+  const messageTokens = tokenize(normalizeForMatch(messageContent));
+  const matched = products.filter((p) => {
+    const productTokens = tokenize(
+      normalizeForMatch([p.name, ...(p.alternative_names ?? [])].join(" "))
+    );
+    return messageTokens.some((mt) =>
+      productTokens.some((pt) => tokensMatch(mt, pt))
+    );
+  });
+  // Open-order products remain available on confirmation/address turns. A
+  // no-match turn deliberately gets no random catalog slice.
+  const mandatory = rawProducts.filter((p) => openProductIds.has(p.id));
+  const unique = new Map(
+    [...mandatory, ...matched].map((product) => [product.id, product])
+  );
+  products = [...unique.values()].slice(0, MAX_FILTERED_PRODUCTS);
 
   const catalog: CompressedProduct[] = products.map((p) => ({
     id: p.id,
@@ -179,31 +275,178 @@ export async function assembleContext(
     responseLanguage: s?.ai_response_language ?? "auto",
     autoAcknowledge: s?.ai_auto_acknowledge ?? false,
     acknowledgeTemplate: s?.ai_acknowledge_template ?? null,
+    requireCustomerName: s?.ai_require_customer_name ?? false,
+    requireCustomerPhone: s?.ai_require_customer_phone ?? false,
+    acknowledgementMode:
+      s?.ai_acknowledgement_mode === "delayed"
+        ? ("delayed" as const)
+        : ("off" as const),
+    acknowledgementDelaySeconds: s?.ai_ack_delay_seconds ?? 12,
   };
 
   // --- Merchant context string (merchant layer for Gemini prompt) ---
   const businessName = merchantResult.data?.business_name ?? "This business";
-  const faq = faqResult.data ?? [];
-  const merchantContext = buildMerchantContext(businessName, settings, faq);
+  const relevantFaq = selectRelevantFaq(
+    faqResult.data ?? [],
+    messageContent,
+    MAX_RELEVANT_FAQS
+  );
+  const merchantContext = buildMerchantContext(
+    businessName,
+    settings,
+    relevantFaq
+  );
+
+  const customerProfile = {
+    name: customerResult.data?.name ?? null,
+    phone: customerResult.data?.phone ?? null,
+    deliveryAddress: customerResult.data?.delivery_address ?? null,
+  };
+  const customerContext = [
+    `Name: ${customerProfile.name ?? "(unknown)"}`,
+    `Phone: ${customerProfile.phone ?? "(unknown)"}`,
+    `Known delivery address: ${customerProfile.deliveryAddress ?? "(unknown)"}`,
+  ].join("\n");
 
   // --- Open collecting order (the running "order so far") ---
-  const collectingOrder =
-    (collectingResult.data as CollectingOrderRow | null) ?? null;
   const collectingOrderId = collectingOrder?.id ?? null;
   const hasOpenCollectingOrder = collectingOrderId !== null;
+  const collectionState = collectingOrder?.ai_collection_state ?? null;
+  const confirmationAllowed = canAcceptConfirmation(collectionState, {
+    senderType: (lastOutbound?.sender_type as SenderType) ?? null,
+    content: lastOutbound?.content ?? null,
+  });
   const orderSoFar = collectingOrder
     ? renderOrderSoFar(collectingOrder, currency)
     : "(no order yet)";
 
+  const detectedLanguage = detectLanguage(messageContent);
+  const olderMessages = allPreviousMessages.slice(0, -8);
+  const previousSummaryCursor =
+    aiStateResult.data?.last_summarized_message_id ?? null;
+  const previousCursorIndex = previousSummaryCursor
+    ? olderMessages.findIndex((message) => message.id === previousSummaryCursor)
+    : -1;
+  const unsummarizedMessages =
+    previousCursorIndex >= 0
+      ? olderMessages.slice(previousCursorIndex + 1)
+      : olderMessages;
+  const summary = buildRollingSummary(
+    aiStateResult.data?.summary ?? "",
+    unsummarizedMessages
+  );
+  const summaryCursor = olderMessages.at(-1)?.id ?? null;
+
+  if (
+    summary !== (aiStateResult.data?.summary ?? "") ||
+    detectedLanguage !== (aiStateResult.data?.detected_language ?? "unknown") ||
+    summaryCursor !== (aiStateResult.data?.last_summarized_message_id ?? null)
+  ) {
+    const { error: stateWriteError } = await supabase
+      .from("conversation_ai_state")
+      .upsert(
+        {
+          conversation_id: conversationId,
+          merchant_id: merchantId,
+          summary,
+          detected_language: detectedLanguage,
+          last_summarized_message_id: summaryCursor,
+          context_version: 1,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "conversation_id" }
+      );
+    if (stateWriteError) {
+      console.error(
+        `[AI Context] Failed to persist bounded conversation state: ${stateWriteError.message}`
+      );
+    }
+  }
+
+  const requiredCustomerFields: AIRequestV1["business"]["required_customer_fields"] = [
+    "delivery_address",
+    ...(settings.requireCustomerName ? (["name"] as const) : []),
+    ...(settings.requireCustomerPhone ? (["phone"] as const) : []),
+  ];
+  const automationMode =
+    conversationResult.data?.automation_mode === "human_takeover"
+      ? "human_takeover"
+      : "ai";
+  const aiRequest: AIRequestV1 = {
+    v: 1,
+    business: {
+      name: businessName,
+      currency,
+      tone: settings.tone,
+      reply_language: settings.responseLanguage,
+      required_customer_fields: requiredCustomerFields,
+    },
+    admin_policy: {
+      assistant_name: settings.personaName,
+      greeting: settings.greeting,
+      business_context: settings.businessContext,
+      custom_instructions: settings.customInstructions,
+    },
+    customer: {
+      name: customerProfile.name,
+      phone: customerProfile.phone,
+      known_address: customerProfile.deliveryAddress,
+      language: detectedLanguage,
+    },
+    conversation: {
+      mode: automationMode,
+      summary,
+      awaiting: collectionState?.awaiting_confirmation
+        ? "confirmation"
+        : (collectionState?.missing_fields.length ?? 0) > 0
+          ? "field"
+          : null,
+    },
+    order: {
+      id: collectingOrderId,
+      items: (collectingOrder?.order_items ?? []).map((item) => ({
+        product_id: item.product_id,
+        name: item.product_name,
+        quantity: item.quantity,
+        variant: item.variant,
+        unit_price: item.unit_price,
+      })),
+      delivery_address: collectingOrder?.delivery_address ?? null,
+      total: collectingOrder?.total ?? 0,
+      missing: collectionState?.missing_fields ?? [],
+      last_readback: collectionState?.last_readback ?? null,
+    },
+    facts: {
+      products: catalog,
+      faqs: relevantFaq.map(({ question, answer }) => ({ question, answer })),
+    },
+    recent: messages.map((message) => ({
+      role: messageRole(
+        message.sender_type as SenderType,
+        message.direction as string
+      ),
+      text: message.content,
+    })),
+    current: {
+      message_ids: excludeMessageIds,
+      text: messageContent,
+    },
+  };
+
   return {
+    aiRequest,
     conversationHistory,
     catalog,
+    customerContext,
+    customerProfile,
     settings,
     merchantContext,
     lastOutboundSenderType,
     orderSoFar,
     hasOpenCollectingOrder,
     collectingOrderId,
+    collectionState,
+    canAcceptConfirmation: confirmationAllowed,
   };
 }
 
@@ -245,14 +488,16 @@ function renderOrderSoFar(
  * match (e.g. a single common word) can't send hundreds of products and blow
  * the token budget.
  */
-const MAX_FILTERED_PRODUCTS = 50;
+const MAX_FILTERED_PRODUCTS = 20;
 
 /**
  * Total character budget for the FAQ block injected into the merchant context.
  * Rows are appended in order until this cumulative budget is reached; the rest
  * are omitted with a short note. Bounds prompt bloat regardless of row count.
  */
-const FAQ_CHAR_BUDGET = 4000;
+const FAQ_CHAR_BUDGET = 1500;
+const MAX_RELEVANT_FAQS = 3;
+const SUMMARY_CHAR_BUDGET = 500;
 
 /**
  * Normalize a string for fuzzy catalog matching. Dependency-free, pure string
@@ -309,6 +554,80 @@ function tokensMatch(messageToken: string, productToken: string): boolean {
     );
   }
   return false;
+}
+
+function selectRelevantFaq(
+  faq: Array<{ question: string; answer: string }>,
+  messageContent: string,
+  limit: number
+): Array<{ question: string; answer: string }> {
+  const messageTokens = tokenize(normalizeForMatch(messageContent));
+  if (messageTokens.length === 0) return [];
+
+  return faq
+    .map((entry) => {
+      const faqTokens = tokenize(
+        normalizeForMatch(`${entry.question} ${entry.answer}`)
+      );
+      const score = messageTokens.reduce(
+        (total, messageToken) =>
+          total +
+          (faqTokens.some((faqToken) => tokensMatch(messageToken, faqToken))
+            ? 1
+            : 0),
+        0
+      );
+      return { entry, score };
+    })
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(({ entry }) => entry);
+}
+
+function detectLanguage(
+  text: string
+): "ar" | "en" | "mixed" | "unknown" {
+  const hasArabic = /[\u0600-\u06ff]/.test(text);
+  const hasLatin = /[a-z]/i.test(text);
+  if (hasArabic && hasLatin) return "mixed";
+  if (hasArabic) return "ar";
+  if (hasLatin) return "en";
+  return "unknown";
+}
+
+function buildRollingSummary(
+  existing: string,
+  messages: Array<{
+    content: string;
+    direction: string;
+    sender_type: string;
+  }>
+): string {
+  if (messages.length === 0) return existing.slice(-SUMMARY_CHAR_BUDGET);
+  const additions = messages
+    .map((message) => {
+      const role = messageRole(
+        message.sender_type as SenderType,
+        message.direction
+      );
+      return `${role}: ${message.content.replace(/\s+/g, " ").trim()}`;
+    })
+    .join(" | ");
+  return [existing, additions]
+    .filter(Boolean)
+    .join(" | ")
+    .slice(-SUMMARY_CHAR_BUDGET);
+}
+
+function messageRole(
+  senderType: SenderType,
+  direction: string
+): "customer" | "assistant" | "merchant" | "system" {
+  if (direction === "inbound") return "customer";
+  if (senderType === "ai") return "assistant";
+  if (senderType === "merchant") return "merchant";
+  return "system";
 }
 
 /**

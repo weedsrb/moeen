@@ -1,7 +1,9 @@
 import { cache } from "react";
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { listOwnedMerchants } from "@/lib/db/merchants";
 import type { User } from "@supabase/supabase-js";
 
 export type Merchant = {
@@ -9,8 +11,11 @@ export type Merchant = {
   business_name: string;
   business_type: string | null;
   city: string | null;
+  phone: string | null;
   onboarding_completed: boolean;
 };
+
+export const ACTIVE_MERCHANT_COOKIE = "active_merchant_id";
 
 export const getUserCached = cache(async () => {
   const supabase = await createClient();
@@ -20,12 +25,41 @@ export const getUserCached = cache(async () => {
   return user;
 });
 
+/**
+ * Resolves which of the user's owned businesses is "active" for this
+ * request: the cookie's merchant_id if it's actually owned by this user,
+ * otherwise the oldest owned business, otherwise null (user owns none yet).
+ */
+export const getActiveMerchantId = cache(
+  async (userId: string): Promise<string | null> => {
+    const cookieStore = await cookies();
+    const requested = cookieStore.get(ACTIVE_MERCHANT_COOKIE)?.value;
+
+    if (requested) {
+      const supabase = await createClient();
+      const { data } = await supabase
+        .from("merchants")
+        .select("id")
+        .eq("id", requested)
+        .eq("user_id", userId)
+        .single();
+      if (data) return data.id;
+    }
+
+    const owned = await listOwnedMerchants(userId);
+    return owned[0]?.id ?? null;
+  }
+);
+
 export const getMerchantCached = cache(async (userId: string) => {
+  const activeMerchantId = await getActiveMerchantId(userId);
+  if (!activeMerchantId) return null;
+
   const supabase = await createClient();
   const { data } = await supabase
     .from("merchants")
-    .select("id, business_name, business_type, city, onboarding_completed")
-    .eq("user_id", userId)
+    .select("id, business_name, business_type, city, phone, onboarding_completed")
+    .eq("id", activeMerchantId)
     .single();
   return data as Merchant | null;
 });

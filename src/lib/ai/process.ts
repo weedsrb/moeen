@@ -10,17 +10,22 @@ import {
   promoteCollectingToIncoming,
   cancelCollectingOrder,
 } from "./order-creator";
-import {
-  validateExtraction,
-  hasHardAvailabilityProblem,
-  isFinalizable,
-  getStockShortfalls,
-} from "./validate-extraction";
-import type { PipelineInput, GeminiResponse, OrderStage } from "./types";
+import type { AssistantTurnV1, PipelineInput } from "./types";
 import type {
   ValidationDiagnostics,
   StockShortfall,
 } from "./validate-extraction";
+import { isGroundedProfileValue } from "./profile-grounding";
+import {
+  enterHumanTakeover,
+  isExplicitHumanRequest,
+} from "./human-takeover";
+import {
+  isRetryableAIProviderError,
+  normalizeAIProviderError,
+} from "./provider";
+import { reduceAssistantTurn } from "./dialogue-state";
+import type { AIProviderMetadata } from "./provider";
 
 /**
  * How long the pipeline waits before processing an inbound message, so a
@@ -74,6 +79,7 @@ export async function processInboundMessage(
     credentials,
     messageCreatedAt,
     skipDebounce,
+    executionMode = "inline",
   } = input;
 
   const supabase = createAdminClient();
@@ -81,6 +87,29 @@ export async function processInboundMessage(
 
   try {
     console.log(`${tag} | START | "${content.slice(0, 80)}"`);
+
+    // Conversation ownership is a hard gate. A merchant reply, explicit
+    // customer handoff, or manual pause puts the thread in human_takeover until
+    // the merchant explicitly resumes AI.
+    const { data: conversationControl, error: conversationControlError } =
+      await supabase
+        .from("conversations")
+        .select("automation_mode")
+        .eq("id", conversationId)
+        .eq("merchant_id", merchantId)
+        .single();
+    if (conversationControlError || !conversationControl) {
+      console.error(`${tag} | control | unable to verify conversation mode`);
+      return;
+    }
+    if (conversationControl.automation_mode === "human_takeover") {
+      console.log(`${tag} | control | human takeover active → skip AI`);
+      await supabase
+        .from("messages")
+        .update({ ai_processed: true })
+        .eq("id", messageId);
+      return;
+    }
 
     // --- Step 0: Burst debounce (last-message-wins) ---
     // Each rapid fragment schedules its own pipeline run. We sleep briefly;
@@ -92,7 +121,7 @@ export async function processInboundMessage(
     let burstIds: string[] = [messageId];
 
     if (!skipDebounce) {
-      await sleep(DEBOUNCE_MS);
+      if (executionMode === "inline") await sleep(DEBOUNCE_MS);
 
       // Successor check: is there a newer inbound *text* message (the only kind
       // that runs this pipeline) in this conversation? Ordering by
@@ -149,15 +178,76 @@ export async function processInboundMessage(
     }
 
     // --- Step 1: Assemble context (includes last outbound sender type) ---
-    const context = await assembleContext(
-      supabase,
-      merchantId,
-      conversationId,
-      effectiveContent
-    );
+    let context: Awaited<ReturnType<typeof assembleContext>>;
+    try {
+      context = await assembleContext(
+        supabase,
+        merchantId,
+        conversationId,
+        customerId,
+        effectiveContent,
+        burstIds
+      );
+    } catch (contextError) {
+      const detail =
+        contextError instanceof Error ? contextError.message : "Unknown context error";
+      console.error(`${tag} | context | FAILED: ${detail}`);
+      await supabase.from("flags").insert({
+        merchant_id: merchantId,
+        conversation_id: conversationId,
+        message_id: messageId,
+        priority: "critical",
+        category: "ai_unavailable",
+        title: "AI context unavailable",
+        description:
+          "Muin could not load the trusted business, customer, catalog, or conversation facts required to answer safely.",
+        recommended_action:
+          "Review the message manually and retry after the backend data is available.",
+      });
+      await supabase
+        .from("messages")
+        .update({ ai_processed: true })
+        .in("id", burstIds);
+      return;
+    }
     console.log(
-      `${tag} | context | ${context.conversationHistory.split("\n").length} messages, ${context.catalog.length} products, lastOutbound=${context.lastOutboundSenderType ?? "none"}`
+      `${tag} | context | v${context.aiRequest.v}, ${context.aiRequest.recent.length} recent messages, ${context.catalog.length} products, ${context.aiRequest.facts.faqs.length} FAQs, lastOutbound=${context.lastOutboundSenderType ?? "none"}`
     );
+    const contextSizes = {
+      inputCharacters: JSON.stringify(context.aiRequest).length,
+      recentMessages: context.aiRequest.recent.length,
+      summaryCharacters: context.aiRequest.conversation.summary.length,
+      products: context.aiRequest.facts.products.length,
+      faqs: context.aiRequest.facts.faqs.length,
+    };
+
+    if (isExplicitHumanRequest(effectiveContent)) {
+      // Send one handoff acknowledgement, then lock the conversation to the
+      // merchant. This bypasses both classifier and full-model ambiguity.
+      await sendAIMessage(
+        supabase,
+        merchantId,
+        conversationId,
+        messageId,
+        chatId,
+        platform,
+        credentials,
+        context.settings.handoffMessage,
+        { allowDuringTakeover: true }
+      );
+      await raiseHandoffFlag(supabase, {
+        merchantId,
+        conversationId,
+        messageId,
+        takeoverReason: "customer_requested",
+      });
+      await supabase
+        .from("messages")
+        .update({ has_order_signal: false, ai_processed: true })
+        .in("id", burstIds);
+      console.log(`${tag} | control | explicit human request → takeover`);
+      return;
+    }
 
     // --- Step 2: Intent gate (cold-start gate) ---
     // Replaces the old rigid regex pre-filter, which was a hard recall ceiling
@@ -298,44 +388,37 @@ export async function processInboundMessage(
           inputHash,
           decisionCase: "ai_unavailable",
           geminiConfidence: null,
+          telemetry: {
+            attempts: 0,
+            contextSizes,
+            errorClass: "circuit_open",
+            replyOutcome: "none",
+          },
         });
         return;
       }
       console.log(`${tag} | breaker | cooldown elapsed → half-open probe`);
     }
 
-    // --- Step 3: Call Gemini (with 1 retry) ---
-    let geminiResponse: GeminiResponse;
+    // --- Step 3: Call the configured AI provider (with one transient retry) ---
+    let assistantTurn: AssistantTurnV1;
+    let modelMetadata: AIProviderMetadata;
+    let aiAttempts = 1;
+    const callConversationModel = () => callGemini(context.aiRequest);
+
     try {
-      geminiResponse = await callGemini(
-        context.conversationHistory,
-        context.catalog,
-        {
-          confidenceThreshold: context.settings.confidenceThreshold,
-          currency: context.settings.currency,
-        },
-        effectiveContent,
-        context.merchantContext,
-        context.orderSoFar
-      );
+      const result = await callConversationModel();
+      assistantTurn = result.turn;
+      modelMetadata = result.metadata;
     } catch (firstError) {
-      console.error(`${tag} | gemini | FAILED (attempt 1):`, firstError);
-      try {
-        geminiResponse = await callGemini(
-          context.conversationHistory,
-          context.catalog,
-          {
-            confidenceThreshold: context.settings.confidenceThreshold,
-            currency: context.settings.currency,
-          },
-          effectiveContent,
-          context.merchantContext,
-          context.orderSoFar
+      const normalizedFirstError = normalizeAIProviderError(firstError);
+      console.error(`${tag} | ai_provider | FAILED (attempt 1):`, firstError);
+
+      if (!isRetryableAIProviderError(firstError)) {
+        console.log(
+          `${tag} | ai_provider | permanent ${normalizedFirstError.kind} failure; skipping blind retry`
         );
-      } catch (secondError) {
-        console.error(`${tag} | gemini | FAILED (attempt 2):`, secondError);
         console.log(`${tag} | action | flagged as ai_unavailable`);
-        // Create flag: ai_unavailable
         await supabase.from("flags").insert({
           merchant_id: merchantId,
           conversation_id: conversationId,
@@ -343,9 +426,9 @@ export async function processInboundMessage(
           priority: "critical",
           category: "ai_unavailable",
           title: "AI processing failed",
-          description: `Gemini API call failed after retry. Error: ${secondError instanceof Error ? secondError.message : "Unknown"}`,
+          description: `AI provider call failed (${normalizedFirstError.kind}). Error: ${normalizedFirstError.message}`,
           recommended_action:
-            "Check GEMINI_API_KEY and API quota. Review the message manually.",
+            "Check the configured AI provider credentials and settings. Review the message manually.",
         });
         await supabase
           .from("messages")
@@ -358,6 +441,57 @@ export async function processInboundMessage(
           inputHash,
           decisionCase: "ai_unavailable",
           geminiConfidence: null,
+          telemetry: {
+            attempts: 1,
+            contextSizes,
+            errorClass: normalizedFirstError.kind,
+            replyOutcome: "none",
+          },
+        });
+        await maybeTripBreaker(supabase, merchantId, tag);
+        return;
+      }
+
+      // Backoff with jitter so simultaneous webhooks do not retry in lockstep.
+      await sleep(750 + Math.floor(Math.random() * 500));
+      aiAttempts = 2;
+      try {
+        const result = await callConversationModel();
+        assistantTurn = result.turn;
+        modelMetadata = result.metadata;
+      } catch (secondError) {
+        const normalizedSecondError = normalizeAIProviderError(secondError);
+        console.error(`${tag} | ai_provider | FAILED (attempt 2):`, secondError);
+        console.log(`${tag} | action | flagged as ai_unavailable`);
+        // Create flag: ai_unavailable
+        await supabase.from("flags").insert({
+          merchant_id: merchantId,
+          conversation_id: conversationId,
+          message_id: messageId,
+          priority: "critical",
+          category: "ai_unavailable",
+          title: "AI processing failed",
+          description: `AI provider call failed after one retry (${normalizedSecondError.kind}). Error: ${normalizedSecondError.message}`,
+          recommended_action:
+            "Check the configured AI provider credentials, quota, and availability. Review the message manually.",
+        });
+        await supabase
+          .from("messages")
+          .update({ ai_processed: true })
+          .in("id", burstIds);
+        await recordDecision(supabase, {
+          merchantId,
+          conversationId,
+          messageId,
+          inputHash,
+          decisionCase: "ai_unavailable",
+          geminiConfidence: null,
+          telemetry: {
+            attempts: 2,
+            contextSizes,
+            errorClass: normalizedSecondError.kind,
+            replyOutcome: "none",
+          },
         });
         // Breaker: this failure may be the one that trips the merchant into a
         // cooldown. Counts recent ai_unavailable flags (including the one just
@@ -375,15 +509,28 @@ export async function processInboundMessage(
       await resetBreaker(supabase, merchantId);
     }
 
-    // --- Step 4: Save AI result to message ---
+    // --- Step 4: Reduce the untrusted proposal into deterministic state ---
+    const resolvedTurn = reduceAssistantTurn({
+      turn: assistantTurn,
+      request: context.aiRequest,
+      canAcceptConfirmation: context.canAcceptConfirmation,
+    });
+    const geminiResponse = resolvedTurn.extraction;
+    const baseTelemetry: DecisionTelemetry = {
+      metadata: modelMetadata,
+      attempts: aiAttempts,
+      contextSizes,
+    };
     console.log(
-      `${tag} | gemini | intent=${geminiResponse.intent}, stage=${geminiResponse.order_stage}, confidence=${(geminiResponse.confidence * 100).toFixed(0)}%, items=${geminiResponse.items.length}, missing=[${geminiResponse.missing_fields.join(",")}], needsHuman=${geminiResponse.needs_human}`
+      `${tag} | ai | intent=${assistantTurn.intent}, act=${assistantTurn.dialogue_act}, resolvedStage=${resolvedTurn.stage}, items=${geminiResponse.items.length}, missing=[${resolvedTurn.missingFields.join(",")}], needsHuman=${resolvedTurn.needsHuman}`
     );
-    if (geminiResponse.reasoning) {
-      console.log(`${tag} | gemini | reasoning: ${geminiResponse.reasoning.slice(0, 200)}`);
+    if (assistantTurn.uncertainty_codes.length > 0) {
+      console.log(
+        `${tag} | ai | uncertainty=${assistantTurn.uncertainty_codes.join(",")}`
+      );
     }
-    if (geminiResponse.reply_to_customer) {
-      console.log(`${tag} | gemini | reply_to_customer: ${geminiResponse.reply_to_customer.slice(0, 150)}`);
+    if (assistantTurn.reply) {
+      console.log(`${tag} | ai | reply: ${assistantTurn.reply.slice(0, 150)}`);
     }
 
     // ai_processed applies to the whole burst; ai_result (the extraction) is
@@ -394,21 +541,24 @@ export async function processInboundMessage(
       .in("id", burstIds);
     await supabase
       .from("messages")
-      .update({ ai_result: geminiResponse as Record<string, unknown> })
+      .update({ ai_result: assistantTurn as Record<string, unknown> })
       .eq("id", messageId);
 
     // --- Step 5: Conversational stage machine ---
-    // The model proposes a stage each turn; the pipeline resolves the REAL stage
-    // deterministically (never trusting the model to upgrade past what's valid),
-    // maintains the single open `collecting` draft, and sends exactly one reply.
+    // The model proposes language and a delta. The reducer owns stage, totals,
+    // missing fields, confirmation validity, and fact-reference validation.
     const { settings } = context;
-    const escalate = geminiResponse.needs_human === true;
-    const reply = geminiResponse.reply_to_customer;
+    const escalate = resolvedTurn.needsHuman;
+    const reply = assistantTurn.reply;
 
     /** Send one reply to the customer via the conversation channel (no-op on null). */
-    const sendReply = async (text: string | null): Promise<void> => {
+    let replyOutcome: ReplyOutcome = "none";
+    const sendReply = async (
+      text: string | null,
+      allowDuringTakeover = false
+    ): Promise<void> => {
       if (!text) return;
-      await sendAIMessage(
+      replyOutcome = await sendAIMessage(
         supabase,
         merchantId,
         conversationId,
@@ -416,14 +566,15 @@ export async function processInboundMessage(
         chatId,
         platform,
         credentials,
-        text
+        text,
+        { allowDuringTakeover }
       );
     };
 
     // --- Non-order intents: no order side effects ---
     if (geminiResponse.intent === "other") {
       if (escalate) await raiseHandoffFlag(supabase, { merchantId, conversationId, messageId });
-      await sendReply(escalate ? settings.handoffMessage : reply);
+      await sendReply(escalate ? settings.handoffMessage : reply, escalate);
       console.log(`${tag} | action | intent=other → ${escalate ? "handoff" : reply ? "reply sent" : "no reply"}`);
       await recordDecision(supabase, {
         merchantId,
@@ -431,7 +582,8 @@ export async function processInboundMessage(
         messageId,
         inputHash,
         decisionCase: "intent_other",
-        geminiConfidence: geminiResponse.confidence,
+        geminiConfidence: null,
+        telemetry: { ...baseTelemetry, replyOutcome },
       });
       return;
     }
@@ -439,7 +591,7 @@ export async function processInboundMessage(
     if (geminiResponse.intent === "question") {
       if (escalate) {
         await raiseHandoffFlag(supabase, { merchantId, conversationId, messageId });
-        await sendReply(settings.handoffMessage);
+        await sendReply(settings.handoffMessage, true);
       } else if (reply) {
         await sendReply(reply);
       } else {
@@ -462,34 +614,62 @@ export async function processInboundMessage(
         messageId,
         inputHash,
         decisionCase: reply || escalate ? "question_answered" : "question_flagged",
-        geminiConfidence: geminiResponse.confidence,
+        geminiConfidence: null,
+        telemetry: { ...baseTelemetry, replyOutcome },
       });
       return;
     }
 
     // --- intent === "order": run the stage machine ---
-    const validation = validateExtraction(geminiResponse, context.catalog);
-    const hasMissing = geminiResponse.missing_fields.length > 0;
-    const hardProblem = hasHardAvailabilityProblem(validation);
-    const stockShortfalls = getStockShortfalls(validation, context.catalog);
-    const finalizable = isFinalizable(validation, geminiResponse.missing_fields);
+    const validation = resolvedTurn.validation;
+    const effectiveMissingFields = resolvedTurn.missingFields;
+    const hasMissing = effectiveMissingFields.length > 0;
+    const hardProblem =
+      validation.items.some((item) => item.product_id === null) ||
+      (validation.diagnostics.outOfStockItems?.length ?? 0) > 0 ||
+      (validation.diagnostics.invalidVariants?.length ?? 0) > 0;
+    const stockShortfalls = resolvedTurn.stockShortfalls;
+    const finalizable = resolvedTurn.finalizable;
     const diagnostics = validation.diagnostics;
+    const replyLanguage = resolveReplyLanguage(
+      context.settings.responseLanguage,
+      effectiveContent
+    );
 
-    // Resolve the real stage. Start from the model's, then FORCE it down: an
-    // order with a hard availability problem, a still-missing required field, or
-    // an active escalation can never be ready_to_confirm/confirmed — it keeps
-    // collecting. An order-intent "none" is treated as collecting.
-    let stage: OrderStage = geminiResponse.order_stage;
-    if (stage === "none") stage = "collecting";
-    if (
-      stage !== "cancelled" &&
-      (hardProblem || hasMissing || escalate) &&
-      (stage === "ready_to_confirm" || stage === "confirmed")
-    ) {
-      stage = "collecting";
+    await persistGroundedCustomerProfile(supabase, {
+      merchantId,
+      customerId,
+      currentMessage: effectiveContent,
+      existing: context.customerProfile,
+      proposed: geminiResponse.customer_info,
+    });
+
+    const stage = resolvedTurn.stage;
+    let safeReply = reply;
+    const confirmationGuardTriggered = resolvedTurn.confirmationRejected;
+    if (stage === "ready_to_confirm") {
+      safeReply = buildConfirmationReadback(
+        validation.items,
+        geminiResponse.customer_info.delivery_address ??
+          context.customerProfile.deliveryAddress,
+        validation.total,
+        context.settings.currency,
+        replyLanguage
+      );
+    } else if (stage === "collecting" && hasMissing) {
+      safeReply = buildMissingFieldQuestion(
+        effectiveMissingFields[0],
+        replyLanguage,
+        context.catalog
+      );
+    }
+    if (confirmationGuardTriggered) {
+      console.warn(
+        `${tag} | confirmation | rejected confirmation without a persisted latest readback`
+      );
     }
     console.log(
-      `${tag} | stage | model=${geminiResponse.order_stage} → resolved=${stage} (missing=${hasMissing}, hardProblem=${hardProblem}, escalate=${escalate}, finalizable=${finalizable})`
+      `${tag} | stage | act=${assistantTurn.dialogue_act} → resolved=${stage} (missing=${hasMissing}, hardProblem=${hardProblem}, escalate=${escalate}, finalizable=${finalizable})`
     );
 
     // --- Cancellation: call off any open draft, send the reply ---
@@ -498,7 +678,7 @@ export async function processInboundMessage(
         await cancelCollectingOrder(supabase, context.collectingOrderId, merchantId);
       }
       if (escalate) await raiseHandoffFlag(supabase, { merchantId, conversationId, messageId });
-      await sendReply(escalate ? settings.handoffMessage : reply);
+      await sendReply(escalate ? settings.handoffMessage : reply, escalate);
       console.log(`${tag} | action | order cancelled by customer${context.collectingOrderId ? ` → ${context.collectingOrderId.slice(0, 8)}` : ""}`);
       await recordDecision(supabase, {
         merchantId,
@@ -506,8 +686,9 @@ export async function processInboundMessage(
         messageId,
         inputHash,
         decisionCase: "order_cancelled_by_customer",
-        geminiConfidence: geminiResponse.confidence,
+        geminiConfidence: null,
         orderId: context.collectingOrderId,
+        telemetry: { ...baseTelemetry, replyOutcome },
       });
       return;
     }
@@ -527,9 +708,22 @@ export async function processInboundMessage(
         currency: context.settings.currency,
         collectingOrderId: context.collectingOrderId,
         collectionState: {
-          missing_fields: geminiResponse.missing_fields,
-          awaiting_confirmation: stage === "ready_to_confirm",
-          last_readback: stage === "ready_to_confirm" ? reply : null,
+          missing_fields: effectiveMissingFields,
+          awaiting_confirmation:
+            stage === "ready_to_confirm" ||
+            (stage === "confirmed" && context.canAcceptConfirmation),
+          last_readback:
+            stage === "ready_to_confirm"
+              ? safeReply
+              : context.collectionState?.last_readback ?? null,
+          customer_info: {
+            name: geminiResponse.customer_info.name ?? context.customerProfile.name,
+            phone:
+              geminiResponse.customer_info.phone ?? context.customerProfile.phone,
+            delivery_address:
+              geminiResponse.customer_info.delivery_address ??
+              context.customerProfile.deliveryAddress,
+          },
         },
       });
       orderId = result.orderId;
@@ -557,7 +751,12 @@ export async function processInboundMessage(
     if (stage === "confirmed" && finalizable && orderId) {
       await promoteCollectingToIncoming(supabase, orderId, merchantId);
       // Prefer the model's acknowledgement; fall back to a short templated ack.
-      await sendReply(escalate ? settings.handoffMessage : (reply ?? "Your order is placed ✅"));
+      await sendReply(
+        escalate
+          ? settings.handoffMessage
+          : safeReply ?? localizedOrderPlaced(replyLanguage),
+        escalate
+      );
       if (escalate) await raiseHandoffFlag(supabase, { merchantId, conversationId, messageId });
       console.log(`${tag} | action | order confirmed → promoted ${orderId.slice(0, 8)} to incoming`);
       await recordDecision(supabase, {
@@ -566,9 +765,10 @@ export async function processInboundMessage(
         messageId,
         inputHash,
         decisionCase: "order_confirmed",
-        geminiConfidence: geminiResponse.confidence,
+        geminiConfidence: null,
         orderId,
         validationDiagnostics: diagnostics,
+        telemetry: { ...baseTelemetry, replyOutcome },
       });
       return;
     }
@@ -581,18 +781,23 @@ export async function processInboundMessage(
     if (escalate) {
       outgoing = settings.handoffMessage;
       await raiseHandoffFlag(supabase, { merchantId, conversationId, messageId });
-    } else if (stockShortfalls.length > 0 && !replyStatesShortfalls(reply, stockShortfalls)) {
-      outgoing = buildStockShortfallReply(stockShortfalls);
+    } else if (
+      stockShortfalls.length > 0 &&
+      !replyStatesShortfalls(safeReply, stockShortfalls)
+    ) {
+      outgoing = buildStockShortfallReply(stockShortfalls, replyLanguage);
       console.log(`${tag} | stock | reply did not surface shortfall → overriding with availability notice`);
+    } else if ((diagnostics.invalidVariants?.length ?? 0) > 0) {
+      outgoing = buildInvalidVariantReply(context.catalog, replyLanguage);
     } else {
-      outgoing = reply;
+      outgoing = safeReply;
     }
-    await sendReply(outgoing);
+    await sendReply(outgoing, escalate);
 
     const decisionCase =
       stage === "ready_to_confirm" ? "order_ready_to_confirm" : "order_collecting";
     console.log(
-      `${tag} | action | stage=${stage} → reply ${outgoing ? "sent" : "none"}, order=${orderId ? orderId.slice(0, 8) : "none (awaiting first item)"}`
+      `${tag} | action | stage=${stage} → reply ${outgoing ? "sent" : "none"}, order=${orderId ? orderId.slice(0, 8) : "none (awaiting first item)"}${confirmationGuardTriggered ? ", confirmationGuard=blocked" : ""}`
     );
     await recordDecision(supabase, {
       merchantId,
@@ -600,9 +805,10 @@ export async function processInboundMessage(
       messageId,
       inputHash,
       decisionCase,
-      geminiConfidence: geminiResponse.confidence,
+      geminiConfidence: null,
       orderId,
       validationDiagnostics: diagnostics,
+      telemetry: { ...baseTelemetry, replyOutcome },
     });
   } catch (err) {
     console.error(`${tag} | ERROR |`, err);
@@ -619,6 +825,22 @@ export async function processInboundMessage(
  * mirrors the raw model score today; it is reserved for a future deterministic
  * re-scoring layer.
  */
+type ReplyOutcome = "none" | "sent" | "suppressed" | "failed";
+
+interface DecisionTelemetry {
+  metadata?: AIProviderMetadata;
+  attempts: number;
+  contextSizes?: {
+    inputCharacters: number;
+    recentMessages: number;
+    summaryCharacters: number;
+    products: number;
+    faqs: number;
+  };
+  errorClass?: string;
+  replyOutcome?: ReplyOutcome;
+}
+
 async function recordDecision(
   supabase: ReturnType<typeof createAdminClient>,
   params: {
@@ -638,22 +860,43 @@ async function recordDecision(
     geminiConfidence: number | null;
     orderId?: string | null;
     validationDiagnostics?: ValidationDiagnostics | null;
+    telemetry?: DecisionTelemetry;
   }
 ): Promise<void> {
   try {
+    const metadata = params.telemetry?.metadata;
     const { error } = await supabase.from("ai_decisions").insert({
       merchant_id: params.merchantId,
       conversation_id: params.conversationId,
       message_id: params.messageId,
       order_id: params.orderId ?? null,
-      model_version: AI_CONFIG.model,
+      provider: metadata?.provider ?? process.env.AI_PROVIDER ?? "gemini",
+      model_version: metadata?.model ?? AI_CONFIG.model,
       prompt_version: AI_CONFIG.promptVersion,
+      context_version: 1,
       input_hash: params.inputHash,
       gemini_confidence: params.geminiConfidence,
       // Equals the raw model score today; reserved for deterministic re-scoring.
       effective_confidence: params.geminiConfidence,
       decision_case: params.decisionCase,
       validation_diagnostics: params.validationDiagnostics ?? null,
+      input_tokens: metadata?.usage.inputTokens ?? null,
+      output_tokens: metadata?.usage.outputTokens ?? null,
+      total_tokens: metadata?.usage.totalTokens ?? null,
+      cached_input_tokens: metadata?.usage.cachedInputTokens ?? null,
+      latency_ms: metadata?.latencyMs ?? null,
+      attempts: params.telemetry?.attempts ?? 0,
+      finish_reason: metadata?.finishReason ?? null,
+      context_sizes: params.telemetry?.contextSizes ?? null,
+      error_class: params.telemetry?.errorClass ?? null,
+      reply_outcome: params.telemetry?.replyOutcome ?? null,
+      requested_settings: {
+        temperature: AI_CONFIG.temperature,
+        maxOutputTokens: AI_CONFIG.maxOutputTokens,
+        reasoningBudget: AI_CONFIG.thinkingBudget,
+        streaming: false,
+      },
+      effective_settings: metadata?.effectiveSettings ?? null,
     });
     if (error) {
       console.error(
@@ -773,7 +1016,12 @@ async function flagStockAndVariantIssues(
  */
 async function raiseHandoffFlag(
   supabase: ReturnType<typeof createAdminClient>,
-  params: { merchantId: string; conversationId: string; messageId: string }
+  params: {
+    merchantId: string;
+    conversationId: string;
+    messageId: string;
+    takeoverReason?: "customer_requested" | "ai_escalation";
+  }
 ): Promise<void> {
   const { merchantId, conversationId, messageId } = params;
   console.log(`[AI Pipeline] ${messageId.slice(0, 8)} | escalation → handoff + flag`);
@@ -787,6 +1035,11 @@ async function raiseHandoffFlag(
     description:
       "The AI escalated this conversation — the customer explicitly asked for a person or the request is out of scope. A handoff message was sent.",
     recommended_action: "Take over the conversation and assist the customer.",
+  });
+  await enterHumanTakeover(supabase, {
+    merchantId,
+    conversationId,
+    reason: params.takeoverReason ?? "ai_escalation",
   });
 }
 
@@ -808,13 +1061,160 @@ function replyStatesShortfalls(
  * Deterministic, truthful availability notice naming each product and the exact
  * amount on hand — used when the model failed to surface a stock shortfall.
  */
-function buildStockShortfallReply(shortfalls: StockShortfall[]): string {
+function buildStockShortfallReply(
+  shortfalls: StockShortfall[],
+  language: "ar" | "en"
+): string {
+  if (language === "ar") {
+    return shortfalls
+      .map(
+        (s) =>
+          `المتوفر حالياً من ${s.productName} هو ${s.available} فقط. هل يناسبك هذا العدد أم تفضل شيئاً آخر؟`
+      )
+      .join(" ");
+  }
   return shortfalls
     .map(
       (s) =>
         `Sorry, we only have ${s.available} of ${s.productName} right now. Would you like that amount, or something else?`
     )
     .join(" ");
+}
+
+function resolveReplyLanguage(
+  configured: string,
+  currentMessage: string
+): "ar" | "en" {
+  if (configured === "ar" || configured === "en") return configured;
+  return /[\u0600-\u06ff]/.test(currentMessage) ? "ar" : "en";
+}
+
+function localizedOrderPlaced(language: "ar" | "en"): string {
+  return language === "ar" ? "تم تأكيد طلبك ✅" : "Your order is confirmed ✅";
+}
+
+function buildInvalidVariantReply(
+  catalog: Array<{ name: string; variants: string[] }>,
+  language: "ar" | "en"
+): string {
+  const products = catalog
+    .filter((product) => product.variants.length > 0)
+    .map((product) => `${product.name}: ${product.variants.join("; ")}`)
+    .join(language === "ar" ? "، " : ", ");
+  return language === "ar"
+    ? `الخيار المطلوب غير متوفر. الخيارات المتاحة هي: ${products}. أي خيار تفضل؟`
+    : `That option is unavailable. The available options are: ${products}. Which would you prefer?`;
+}
+
+function buildConfirmationReadback(
+  items: Array<{
+    product_name: string;
+    variant: string | null;
+    quantity: number;
+  }>,
+  deliveryAddress: string | null,
+  total: number,
+  currency: string,
+  language: "ar" | "en"
+): string {
+  const itemText = items
+    .map((item) => {
+      const variant = item.variant ? ` (${item.variant})` : "";
+      return `${item.quantity}× ${item.product_name}${variant}`;
+    })
+    .join(language === "ar" ? "، " : ", ");
+  const address = deliveryAddress ?? (language === "ar" ? "غير محدد" : "not provided");
+
+  return language === "ar"
+    ? `للتأكيد: ${itemText}. المجموع ${total} ${currency}، والتوصيل إلى ${address}. هل أؤكد الطلب؟`
+    : `To confirm: ${itemText}. Total ${total} ${currency}, delivered to ${address}. Shall I place the order?`;
+}
+
+function buildMissingFieldQuestion(
+  field: string,
+  language: "ar" | "en",
+  catalog: Array<{ id: string; name: string }>
+): string {
+  if (field === "products") {
+    return language === "ar"
+      ? "ما المنتج الذي ترغب بطلبه؟"
+      : "Which product would you like to order?";
+  }
+  if (field === "delivery_address") {
+    return language === "ar"
+      ? "ما عنوان التوصيل؟"
+      : "What is the delivery address?";
+  }
+  if (field === "name") {
+    return language === "ar" ? "ما الاسم للطلب؟" : "What name should I use for the order?";
+  }
+  if (field === "phone") {
+    return language === "ar"
+      ? "ما رقم الهاتف للتواصل بخصوص الطلب؟"
+      : "What phone number should we use for the order?";
+  }
+  if (field.startsWith("variant:")) {
+    const productId = field.slice("variant:".length);
+    const productName = catalog.find((product) => product.id === productId)?.name;
+    return language === "ar"
+      ? `أي خيار تفضل${productName ? ` لـ ${productName}` : ""}؟`
+      : `Which option would you like${productName ? ` for ${productName}` : ""}?`;
+  }
+  return language === "ar"
+    ? "ما المعلومة المتبقية لإكمال الطلب؟"
+    : "What remaining detail should I use to complete the order?";
+}
+
+async function persistGroundedCustomerProfile(
+  supabase: ReturnType<typeof createAdminClient>,
+  params: {
+    merchantId: string;
+    customerId: string;
+    currentMessage: string;
+    existing: {
+      name: string | null;
+      phone: string | null;
+      deliveryAddress: string | null;
+    };
+    proposed: {
+      name?: string | null;
+      phone?: string | null;
+      delivery_address?: string | null;
+    };
+  }
+): Promise<void> {
+  const update: Record<string, string> = {};
+  if (
+    params.proposed.name !== params.existing.name &&
+    isGroundedProfileValue(params.proposed.name, params.currentMessage)
+  ) {
+    update.name = params.proposed.name;
+  }
+  if (
+    params.proposed.phone !== params.existing.phone &&
+    isGroundedProfileValue(params.proposed.phone, params.currentMessage)
+  ) {
+    update.phone = params.proposed.phone;
+  }
+  if (
+    params.proposed.delivery_address !== params.existing.deliveryAddress &&
+    isGroundedProfileValue(
+      params.proposed.delivery_address,
+      params.currentMessage
+    )
+  ) {
+    update.delivery_address = params.proposed.delivery_address;
+  }
+  if (Object.keys(update).length === 0) return;
+
+  const { error } = await supabase
+    .from("customers")
+    .update(update)
+    .eq("id", params.customerId)
+    .eq("merchant_id", params.merchantId);
+  if (error) {
+    console.error(`[AI Pipeline] customer profile update failed: ${error.message}`);
+  }
 }
 
 // --- Circuit breaker helpers ---
@@ -935,8 +1335,25 @@ async function sendAIMessage(
   chatId: string,
   platform: string,
   credentials: Record<string, string>,
-  text: string
-): Promise<void> {
+  text: string,
+  options: { allowDuringTakeover?: boolean } = {}
+): Promise<Exclude<ReplyOutcome, "none">> {
+  if (!options.allowDuringTakeover) {
+    // Re-check immediately before the external send to close the race where a
+    // merchant takes over while a model call is still in flight.
+    const { data: control, error } = await supabase
+      .from("conversations")
+      .select("automation_mode")
+      .eq("id", conversationId)
+      .eq("merchant_id", merchantId)
+      .single();
+    if (error || control?.automation_mode !== "ai") {
+      console.log(
+        "[AI Pipeline] sendAI | skipped because human takeover is active or unverifiable"
+      );
+      return "suppressed";
+    }
+  }
   console.log(`[AI Pipeline] sendAI | to=${chatId} via ${platform} | "${text.slice(0, 100)}"`);
   const provider = getProvider(platform, credentials);
   const result = await provider.sendMessage(chatId, text);
@@ -959,7 +1376,7 @@ async function sendAIMessage(
     } else {
       console.error(`[AI Pipeline] sendAI | send failed: ${result.error ?? "unknown"}`);
     }
-    return;
+    return "failed";
   }
 
   // Save outbound AI message to DB
@@ -983,4 +1400,5 @@ async function sendAIMessage(
       last_message_preview: text.substring(0, 100),
     })
     .eq("id", conversationId);
+  return "sent";
 }

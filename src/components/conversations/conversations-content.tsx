@@ -17,7 +17,7 @@ import {
 } from "./conversations-filter-bar";
 import type { ChatSendRef } from "@/components/chat/chat-thread";
 import { Button } from "@/components/ui/button";
-import { ChevronLeft } from "lucide-react";
+import { Bot, ChevronLeft, Loader2, UserRound } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Conversation, Message } from "@/types/message";
 
@@ -44,6 +44,7 @@ export function ConversationsContent({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mobileShowChat, setMobileShowChat] = useState(false);
   const [replyTarget, setReplyTarget] = useState<Message | null>(null);
+  const [changingAutomation, setChangingAutomation] = useState(false);
   const [filters, setFilters] = useState<ConversationFilters>({
     search: "",
     status: "all",
@@ -156,6 +157,48 @@ export function ConversationsContent({
     }).catch(() => {});
   }
 
+  async function handleAutomationModeChange() {
+    if (!selected || changingAutomation) return;
+    const nextMode =
+      selected.automation_mode === "human_takeover" ? "ai" : "human_takeover";
+    const previousMode = selected.automation_mode;
+
+    setChangingAutomation(true);
+    setConversations((prev) =>
+      prev.map((conversation) =>
+        conversation.id === selected.id
+          ? { ...conversation, automation_mode: nextMode }
+          : conversation
+      )
+    );
+    try {
+      const response = await fetch(`/api/conversations/${selected.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ automation_mode: nextMode }),
+      });
+      if (!response.ok) throw new Error("Failed to update conversation mode");
+      const payload = await response.json();
+      setConversations((prev) =>
+        prev.map((conversation) =>
+          conversation.id === selected.id
+            ? { ...conversation, ...payload.conversation }
+            : conversation
+        )
+      );
+    } catch {
+      setConversations((prev) =>
+        prev.map((conversation) =>
+          conversation.id === selected.id
+            ? { ...conversation, automation_mode: previousMode }
+            : conversation
+        )
+      );
+    } finally {
+      setChangingAutomation(false);
+    }
+  }
+
   const customerName = selected?.customers?.name ?? "Unknown";
   const customerAvatar = selected?.customers?.avatar_url ?? null;
 
@@ -219,7 +262,7 @@ export function ConversationsContent({
                   />
                 )}
               </div>
-              <div>
+              <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium">{customerName}</p>
                 <p className="text-[10px] text-muted-foreground">
                   {selected.platform === "instagram"
@@ -229,6 +272,29 @@ export function ConversationsContent({
                       : selected.platform}
                 </p>
               </div>
+              <Button
+                type="button"
+                size="sm"
+                variant={
+                  selected.automation_mode === "human_takeover"
+                    ? "default"
+                    : "outline"
+                }
+                onClick={handleAutomationModeChange}
+                disabled={changingAutomation}
+                className="shrink-0 gap-1.5"
+              >
+                {changingAutomation ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : selected.automation_mode === "human_takeover" ? (
+                  <Bot className="h-3.5 w-3.5" />
+                ) : (
+                  <UserRound className="h-3.5 w-3.5" />
+                )}
+                {selected.automation_mode === "human_takeover"
+                  ? "Resume AI"
+                  : "Take over"}
+              </Button>
             </div>
 
             {/* Messages */}

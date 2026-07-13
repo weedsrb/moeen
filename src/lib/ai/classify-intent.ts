@@ -1,6 +1,6 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { z } from "zod/v4";
 import { AI_CONFIG } from "./gemini";
+import { getAIProvider } from "./provider-registry";
 
 /**
  * Cheap/fast LLM intent classifier — the cold-start gate that replaces the
@@ -59,31 +59,22 @@ export async function classifyIntent(
   message: string,
   recentHistory: string
 ): Promise<"order" | "question" | "other"> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY is not configured");
-  }
-
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({
+  const provider = getAIProvider();
+  const result = await provider.generate({
+    task: "intent_classifier",
     model: AI_CONFIG.classifierModel,
-    generationConfig: {
-      // Deterministic, cheap, tiny — and NO thinkingConfig, so the classifier
-      // stays fast and low-cost (the whole point of the two-stage filter).
-      temperature: 0,
-      maxOutputTokens: 50,
-      responseMimeType: "application/json",
-    },
+    prompt: [
+      CLASSIFIER_RULES,
+      fenceData("RECENT_HISTORY", recentHistory || "(no prior messages)"),
+      fenceData("CUSTOMER_MESSAGE", message),
+    ].join("\n\n"),
+    temperature: 0,
+    maxOutputTokens: 64,
+    timeoutMs: 5_000,
+    responseFormat: "json",
   });
 
-  const prompt = [
-    CLASSIFIER_RULES,
-    fenceData("RECENT_HISTORY", recentHistory || "(no prior messages)"),
-    fenceData("CUSTOMER_MESSAGE", message),
-  ].join("\n\n");
-
-  const result = await model.generateContent(prompt);
-  const text = result.response.text();
+  const text = result.text;
 
   // Any parse/validation failure throws — the caller fails open to the regex.
   const parsed: unknown = JSON.parse(text);

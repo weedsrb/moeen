@@ -1,3 +1,4 @@
+import { redirect } from "next/navigation";
 import {
   Card,
   CardContent,
@@ -6,8 +7,13 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { BusinessBasicsForm } from "@/components/onboarding/business-basics-form";
+import { getMerchantCached, requireUser } from "@/lib/auth/require-merchant";
 
-export default function OnboardingPage() {
+export default async function OnboardingPage() {
+  const { user } = await requireUser();
+  const merchant = await getMerchantCached(user.id);
+  if (merchant?.onboarding_completed) redirect("/dashboard");
+
   return (
     <div className="flex min-h-screen items-center justify-center px-4">
       <Card className="w-full max-w-md">

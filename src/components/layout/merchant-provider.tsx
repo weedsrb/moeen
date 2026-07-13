@@ -33,3 +33,37 @@ export function useMerchant() {
   }
   return context;
 }
+
+export type OwnedMerchantSummary = {
+  id: string;
+  businessName: string;
+  businessType: string | null;
+};
+
+const OwnedMerchantsContext = createContext<OwnedMerchantSummary[] | null>(
+  null
+);
+
+export function OwnedMerchantsProvider({
+  merchants,
+  children,
+}: {
+  merchants: OwnedMerchantSummary[];
+  children: React.ReactNode;
+}) {
+  return (
+    <OwnedMerchantsContext.Provider value={merchants}>
+      {children}
+    </OwnedMerchantsContext.Provider>
+  );
+}
+
+export function useOwnedMerchants() {
+  const context = useContext(OwnedMerchantsContext);
+  if (!context) {
+    throw new Error(
+      "useOwnedMerchants must be used within an OwnedMerchantsProvider"
+    );
+  }
+  return context;
+}

@@ -22,7 +22,11 @@ const businessTypes = [
   { value: "other", label: "Other" },
 ];
 
-export function BusinessBasicsForm() {
+export function BusinessBasicsForm({
+  submitLabel = "Get Started",
+}: {
+  submitLabel?: string;
+} = {}) {
   const [state, formAction, isPending] = useActionState<OnboardingState, FormData>(
     createMerchantProfile,
     {}
@@ -82,7 +86,7 @@ export function BusinessBasicsForm() {
 
       <Button type="submit" className="w-full" disabled={isPending}>
         {isPending && <Loader2 className="me-2 h-4 w-4 animate-spin" />}
-        Get Started
+        {submitLabel}
       </Button>
     </form>
   );
