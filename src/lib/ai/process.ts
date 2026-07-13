@@ -27,6 +27,10 @@ import {
   isExplicitHumanRequest,
 } from "./human-takeover";
 import { resolveRequiredMissingFields } from "./order-policy";
+import {
+  isRetryableAIProviderError,
+  normalizeAIProviderError,
+} from "./provider";
 
 /**
  * How long the pipeline waits before processing an inbound message, so a
@@ -387,10 +391,10 @@ export async function processInboundMessage(
       console.log(`${tag} | breaker | cooldown elapsed → half-open probe`);
     }
 
-    // --- Step 3: Call Gemini (with 1 retry) ---
+    // --- Step 3: Call the configured AI provider (with one transient retry) ---
     let geminiResponse: GeminiResponse;
-    try {
-      geminiResponse = await callGemini(
+    const callConversationModel = () =>
+      callGemini(
         context.conversationHistory,
         context.catalog,
         {
@@ -404,25 +408,52 @@ export async function processInboundMessage(
         context.orderSoFar,
         context.customerContext
       );
+
+    try {
+      geminiResponse = await callConversationModel();
     } catch (firstError) {
-      console.error(`${tag} | gemini | FAILED (attempt 1):`, firstError);
-      try {
-        geminiResponse = await callGemini(
-          context.conversationHistory,
-          context.catalog,
-          {
-            confidenceThreshold: context.settings.confidenceThreshold,
-            currency: context.settings.currency,
-            requireCustomerName: context.settings.requireCustomerName,
-            requireCustomerPhone: context.settings.requireCustomerPhone,
-          },
-          effectiveContent,
-          context.merchantContext,
-          context.orderSoFar,
-          context.customerContext
+      const normalizedFirstError = normalizeAIProviderError(firstError);
+      console.error(`${tag} | ai_provider | FAILED (attempt 1):`, firstError);
+
+      if (!isRetryableAIProviderError(firstError)) {
+        console.log(
+          `${tag} | ai_provider | permanent ${normalizedFirstError.kind} failure; skipping blind retry`
         );
+        console.log(`${tag} | action | flagged as ai_unavailable`);
+        await supabase.from("flags").insert({
+          merchant_id: merchantId,
+          conversation_id: conversationId,
+          message_id: messageId,
+          priority: "critical",
+          category: "ai_unavailable",
+          title: "AI processing failed",
+          description: `AI provider call failed (${normalizedFirstError.kind}). Error: ${normalizedFirstError.message}`,
+          recommended_action:
+            "Check the configured AI provider credentials and settings. Review the message manually.",
+        });
+        await supabase
+          .from("messages")
+          .update({ ai_processed: true })
+          .in("id", burstIds);
+        await recordDecision(supabase, {
+          merchantId,
+          conversationId,
+          messageId,
+          inputHash,
+          decisionCase: "ai_unavailable",
+          geminiConfidence: null,
+        });
+        await maybeTripBreaker(supabase, merchantId, tag);
+        return;
+      }
+
+      // Backoff with jitter so simultaneous webhooks do not retry in lockstep.
+      await sleep(750 + Math.floor(Math.random() * 500));
+      try {
+        geminiResponse = await callConversationModel();
       } catch (secondError) {
-        console.error(`${tag} | gemini | FAILED (attempt 2):`, secondError);
+        const normalizedSecondError = normalizeAIProviderError(secondError);
+        console.error(`${tag} | ai_provider | FAILED (attempt 2):`, secondError);
         console.log(`${tag} | action | flagged as ai_unavailable`);
         // Create flag: ai_unavailable
         await supabase.from("flags").insert({
@@ -432,9 +463,9 @@ export async function processInboundMessage(
           priority: "critical",
           category: "ai_unavailable",
           title: "AI processing failed",
-          description: `Gemini API call failed after retry. Error: ${secondError instanceof Error ? secondError.message : "Unknown"}`,
+          description: `AI provider call failed after one retry (${normalizedSecondError.kind}). Error: ${normalizedSecondError.message}`,
           recommended_action:
-            "Check GEMINI_API_KEY and API quota. Review the message manually.",
+            "Check the configured AI provider credentials, quota, and availability. Review the message manually.",
         });
         await supabase
           .from("messages")

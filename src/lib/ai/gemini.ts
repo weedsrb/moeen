@@ -1,5 +1,5 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { geminiResponseSchema, type GeminiResponse, type CompressedProduct } from "./types";
+import { getAIProvider } from "./provider-registry";
 
 /**
  * Versioned AI configuration — model identity + generation params.
@@ -8,10 +8,11 @@ import { geminiResponseSchema, type GeminiResponse, type CompressedProduct } fro
  * Bump `promptVersion` whenever SYSTEM rules change materially.
  */
 export const AI_CONFIG = {
-  model: "gemini-2.5-flash",
+  model: process.env.GEMINI_CONVERSATION_MODEL ?? "gemini-2.5-flash",
   // Cheap/fast model for the cold-start intent classifier (see classify-intent.ts).
   // NOTE: verify against the live Gemini model list — model ids change over time.
-  classifierModel: "gemini-2.5-flash-lite",
+  classifierModel:
+    process.env.GEMINI_CLASSIFIER_MODEL ?? "gemini-2.5-flash-lite",
   promptVersion: "v3",
   temperature: 0.1,
   maxOutputTokens: 8192,
@@ -212,45 +213,38 @@ export async function callGemini(
   orderSoFar: string,
   customerContext: string
 ): Promise<GeminiResponse> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY is not configured");
-  }
-
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({
+  const provider = getAIProvider();
+  const result = await provider.generate({
+    task: "conversation",
     model: AI_CONFIG.model,
-    generationConfig: {
-      temperature: AI_CONFIG.temperature,
-      maxOutputTokens: AI_CONFIG.maxOutputTokens,
-      topP: AI_CONFIG.topP,
-      topK: AI_CONFIG.topK,
-      responseMimeType: "application/json",
-      // @ts-expect-error -- thinkingConfig is supported by Gemini 2.5 but not yet in SDK types
-      thinkingConfig: { thinkingBudget: AI_CONFIG.thinkingBudget },
-    },
+    prompt: buildPrompt({
+      currency: settings.currency,
+      merchantContext,
+      catalog,
+      orderSoFar,
+      customerContext,
+      requiredCustomerFields: [
+        ...(settings.requireCustomerName ? (["name"] as const) : []),
+        ...(settings.requireCustomerPhone ? (["phone"] as const) : []),
+      ],
+      conversationHistory,
+      currentMessage,
+    }),
+    temperature: AI_CONFIG.temperature,
+    maxOutputTokens: AI_CONFIG.maxOutputTokens,
+    topP: AI_CONFIG.topP,
+    topK: AI_CONFIG.topK,
+    reasoningBudget: AI_CONFIG.thinkingBudget,
+    timeoutMs: 20_000,
+    responseFormat: "json",
   });
 
-  const prompt = buildPrompt({
-    currency: settings.currency,
-    merchantContext,
-    catalog,
-    orderSoFar,
-    customerContext,
-    requiredCustomerFields: [
-      ...(settings.requireCustomerName ? (["name"] as const) : []),
-      ...(settings.requireCustomerPhone ? (["phone"] as const) : []),
-    ],
-    conversationHistory,
-    currentMessage,
-  });
+  const finishReason = result.metadata.finishReason ?? "unknown";
+  const text = result.text;
 
-  const result = await model.generateContent(prompt);
-  const candidate = result.response.candidates?.[0];
-  const finishReason = candidate?.finishReason ?? "unknown";
-  const text = result.response.text();
-
-  console.log(`[AI Pipeline] gemini raw response length: ${text.length}, finishReason: ${finishReason}`);
+  console.log(
+    `[AI Pipeline] ${result.metadata.provider} raw response length: ${text.length}, finishReason: ${finishReason}, latencyMs: ${result.metadata.latencyMs}`
+  );
 
   // Gemini sometimes returns truncated JSON despite responseMimeType.
   // Attempt to parse, and if it fails, try to repair common truncation issues.
