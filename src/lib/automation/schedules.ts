@@ -51,5 +51,12 @@ export async function runAutomationSchedule(
     if (error) throw new Error(error.message);
     return data as ScheduleResult;
   }
+  if (workflowType === "daily-summary") {
+    const { data, error } = await _supabase.rpc("run_daily_summary_schedule", {
+      p_dry_run: dryRun,
+    });
+    if (error) throw new Error(error.message);
+    return data as ScheduleResult;
+  }
   throw new Error(`Schedule not implemented yet: ${workflowType}`);
 }
