@@ -1,0 +1,164 @@
+{
+  "name": "Muin - Daily Summary",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Hebron"
+  },
+  "nodes": [
+    {
+      "id": "schedule",
+      "name": "Every Fifteen Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0],
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 15 }]
+        }
+      }
+    },
+    {
+      "id": "sign-schedule",
+      "name": "Sign Schedule Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst path = '/api/internal/automation/schedules/daily-summary';\nconst body = JSON.stringify({dry_run:false});\nconst timestamp = Math.floor(Date.now()/1000).toString();\nconst bodyHash = crypto.createHash('sha256').update(body).digest('hex');\nconst canonical = ['POST',path,timestamp,bodyHash].join('\\n');\nconst signature = crypto.createHmac('sha256',$env.MUIN_AUTOMATION_HMAC_SECRET).update(canonical).digest('hex');\nreturn [{json:{path,body,timestamp,bodyHash,signature}}];"
+      }
+    },
+    {
+      "id": "schedule-api",
+      "name": "Create Notifications",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.MUIN_APP_BASE_URL + $json.path}}",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [
+          { "name": "content-type", "value": "application/json" },
+          { "name": "x-muin-key-id", "value": "={{$env.MUIN_AUTOMATION_HMAC_KEY_ID}}" },
+          { "name": "x-muin-timestamp", "value": "={{$json.timestamp}}" },
+          { "name": "x-muin-body-sha256", "value": "={{$json.bodyHash}}" },
+          { "name": "x-muin-signature", "value": "={{$json.signature}}" }
+        ]},
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{$json.body}}"
+      }
+    },
+    {
+      "id": "sign-claim",
+      "name": "Sign Claim Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst path = '/api/internal/automation/jobs/claim';\nconst body = JSON.stringify({workflow_type:'daily-summary',limit:20,lease_seconds:120});\nconst timestamp = Math.floor(Date.now()/1000).toString();\nconst bodyHash = crypto.createHash('sha256').update(body).digest('hex');\nconst canonical = ['POST',path,timestamp,bodyHash].join('\\n');\nconst signature = crypto.createHmac('sha256',$env.MUIN_AUTOMATION_HMAC_SECRET).update(canonical).digest('hex');\nreturn [{json:{path,body,timestamp,bodyHash,signature}}];"
+      }
+    },
+    {
+      "id": "claim-api",
+      "name": "Claim Email Jobs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.MUIN_APP_BASE_URL + $json.path}}",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [
+          { "name": "content-type", "value": "application/json" },
+          { "name": "x-muin-key-id", "value": "={{$env.MUIN_AUTOMATION_HMAC_KEY_ID}}" },
+          { "name": "x-muin-timestamp", "value": "={{$json.timestamp}}" },
+          { "name": "x-muin-body-sha256", "value": "={{$json.bodyHash}}" },
+          { "name": "x-muin-signature", "value": "={{$json.signature}}" }
+        ]},
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{$json.body}}"
+      }
+    },
+    {
+      "id": "split-jobs",
+      "name": "Split Jobs",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [1100, 0],
+      "parameters": { "fieldToSplitOut": "jobs", "options": {} }
+    },
+    {
+      "id": "resend",
+      "name": "Send via Resend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [
+          { "name": "authorization", "value": "=Bearer {{$env.RESEND_API_KEY}}" },
+          { "name": "content-type", "value": "application/json" },
+          { "name": "idempotency-key", "value": "={{$json.idempotency_key}}" }
+        ]},
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{JSON.stringify({from:$env.RESEND_FROM_EMAIL,to:[$json.payload.to],subject:$json.payload.subject,text:$json.payload.text})}}",
+        "options": { "response": { "response": { "fullResponse": true, "neverError": true } } }
+      }
+    },
+    {
+      "id": "sign-result",
+      "name": "Sign Result Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 0],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst job = $('Split Jobs').item.json;\nconst success = $json.statusCode >= 200 && $json.statusCode < 300;\nconst path = `/api/internal/automation/jobs/${job.id}/${success?'complete':'fail'}`;\nconst body = JSON.stringify(success ? {provider_message_id:$json.body?.id ?? null} : {error_class:'resend_http',error_message:`HTTP ${$json.statusCode}`});\nconst timestamp = Math.floor(Date.now()/1000).toString();\nconst bodyHash = crypto.createHash('sha256').update(body).digest('hex');\nconst canonical = ['POST',path,timestamp,bodyHash].join('\\n');\nconst signature = crypto.createHmac('sha256',$env.MUIN_AUTOMATION_HMAC_SECRET).update(canonical).digest('hex');\nreturn [{json:{path,body,timestamp,bodyHash,signature}}];"
+      }
+    },
+    {
+      "id": "report-api",
+      "name": "Report Job Result",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1760, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.MUIN_APP_BASE_URL + $json.path}}",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [
+          { "name": "content-type", "value": "application/json" },
+          { "name": "x-muin-key-id", "value": "={{$env.MUIN_AUTOMATION_HMAC_KEY_ID}}" },
+          { "name": "x-muin-timestamp", "value": "={{$json.timestamp}}" },
+          { "name": "x-muin-body-sha256", "value": "={{$json.bodyHash}}" },
+          { "name": "x-muin-signature", "value": "={{$json.signature}}" }
+        ]},
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{$json.body}}"
+      }
+    }
+  ],
+  "connections": {
+    "Every Fifteen Minutes": { "main": [[{ "node": "Sign Schedule Request", "type": "main", "index": 0 }]] },
+    "Sign Schedule Request": { "main": [[{ "node": "Create Notifications", "type": "main", "index": 0 }]] },
+    "Create Notifications": { "main": [[{ "node": "Sign Claim Request", "type": "main", "index": 0 }]] },
+    "Sign Claim Request": { "main": [[{ "node": "Claim Email Jobs", "type": "main", "index": 0 }]] },
+    "Claim Email Jobs": { "main": [[{ "node": "Split Jobs", "type": "main", "index": 0 }]] },
+    "Split Jobs": { "main": [[{ "node": "Send via Resend", "type": "main", "index": 0 }]] },
+    "Send via Resend": { "main": [[{ "node": "Sign Result Report", "type": "main", "index": 0 }]] },
+    "Sign Result Report": { "main": [[{ "node": "Report Job Result", "type": "main", "index": 0 }]] }
+  },
+  "pinData": {},
+  "meta": { "templateCredsSetupCompleted": false },
+  "versionId": "00000000-0000-4000-8000-000000000018"
+}
