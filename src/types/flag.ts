@@ -2,6 +2,7 @@ export type FlagPriority = "critical" | "medium" | "low";
 
 export type FlagCategory =
   | "out_of_stock"
+  | "low_stock"
   | "customer_waiting"
   | "ai_low_confidence"
   | "human_requested"
