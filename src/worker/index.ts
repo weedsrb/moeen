@@ -5,6 +5,7 @@ import {
   claimAIQueue,
   completeAIQueueMessage,
   failAIQueueMessage,
+  getAIExecutionBackend,
   type ClaimedAIMessage,
 } from "@/lib/ai/queue";
 import { getMerchantCredentials } from "@/lib/messaging/credentials";
@@ -23,6 +24,8 @@ const heartbeatMs = 15_000;
 
 let stopping = false;
 let lastHeartbeat = 0;
+let lastRuntimeCheck = 0;
+let queueBackendEnabled = false;
 const active = new Set<Promise<void>>();
 const supabase = createAdminClient();
 
@@ -45,6 +48,14 @@ function sleep(ms: number): Promise<void> {
 function errorClass(error: unknown): string {
   if (error instanceof Error) return error.name.slice(0, 100) || "Error";
   return "unknown";
+}
+
+async function canConsumeQueue(): Promise<boolean> {
+  const now = Date.now();
+  if (now - lastRuntimeCheck < 2_000) return queueBackendEnabled;
+  lastRuntimeCheck = now;
+  queueBackendEnabled = (await getAIExecutionBackend(supabase)) === "queue";
+  return queueBackendEnabled;
 }
 
 async function failClaim(
@@ -386,6 +397,10 @@ async function run(): Promise<void> {
   console.log(`[AI Worker] starting (concurrency=${concurrency})`);
   while (!stopping) {
     await publishHeartbeat();
+    if (!(await canConsumeQueue())) {
+      await sleep(pollMs);
+      continue;
+    }
     const capacity = concurrency - active.size;
     if (capacity <= 0) {
       await Promise.race([...active]);
