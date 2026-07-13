@@ -124,6 +124,12 @@ export interface CompressedProduct {
 export interface AssembledContext {
   conversationHistory: string;
   catalog: CompressedProduct[];
+  customerContext: string;
+  customerProfile: {
+    name: string | null;
+    phone: string | null;
+    deliveryAddress: string | null;
+  };
   settings: {
     confidenceThreshold: number;
     autoClarity: boolean;

@@ -153,6 +153,7 @@ export function buildPrompt(params: {
   merchantContext: string;
   catalog: CompressedProduct[];
   orderSoFar: string;
+  customerContext: string;
   conversationHistory: string;
   currentMessage: string;
 }): string {
@@ -160,6 +161,7 @@ export function buildPrompt(params: {
     buildSystemRules(params.currency),
     fenceData("MERCHANT_CONTEXT", params.merchantContext),
     fenceData("CATALOG", JSON.stringify(params.catalog, null, 2)),
+    fenceData("CUSTOMER_PROFILE", params.customerContext),
     fenceData("ORDER_SO_FAR", params.orderSoFar || "(no order yet)"),
     fenceData("CONVERSATION", params.conversationHistory || "(no prior messages)"),
     fenceData("CURRENT_MESSAGE", params.currentMessage),
@@ -189,7 +191,8 @@ export async function callGemini(
   settings: { confidenceThreshold: number; currency: string },
   currentMessage: string,
   merchantContext: string,
-  orderSoFar: string
+  orderSoFar: string,
+  customerContext: string
 ): Promise<GeminiResponse> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -215,6 +218,7 @@ export async function callGemini(
     merchantContext,
     catalog,
     orderSoFar,
+    customerContext,
     conversationHistory,
     currentMessage,
   });

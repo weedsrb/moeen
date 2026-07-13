@@ -21,6 +21,7 @@ import type {
   ValidationDiagnostics,
   StockShortfall,
 } from "./validate-extraction";
+import { isGroundedProfileValue } from "./profile-grounding";
 
 /**
  * How long the pipeline waits before processing an inbound message, so a
@@ -149,12 +150,38 @@ export async function processInboundMessage(
     }
 
     // --- Step 1: Assemble context (includes last outbound sender type) ---
-    const context = await assembleContext(
-      supabase,
-      merchantId,
-      conversationId,
-      effectiveContent
-    );
+    let context: Awaited<ReturnType<typeof assembleContext>>;
+    try {
+      context = await assembleContext(
+        supabase,
+        merchantId,
+        conversationId,
+        customerId,
+        effectiveContent,
+        burstIds
+      );
+    } catch (contextError) {
+      const detail =
+        contextError instanceof Error ? contextError.message : "Unknown context error";
+      console.error(`${tag} | context | FAILED: ${detail}`);
+      await supabase.from("flags").insert({
+        merchant_id: merchantId,
+        conversation_id: conversationId,
+        message_id: messageId,
+        priority: "critical",
+        category: "ai_unavailable",
+        title: "AI context unavailable",
+        description:
+          "Muin could not load the trusted business, customer, catalog, or conversation facts required to answer safely.",
+        recommended_action:
+          "Review the message manually and retry after the backend data is available.",
+      });
+      await supabase
+        .from("messages")
+        .update({ ai_processed: true })
+        .in("id", burstIds);
+      return;
+    }
     console.log(
       `${tag} | context | ${context.conversationHistory.split("\n").length} messages, ${context.catalog.length} products, lastOutbound=${context.lastOutboundSenderType ?? "none"}`
     );
@@ -316,7 +343,8 @@ export async function processInboundMessage(
         },
         effectiveContent,
         context.merchantContext,
-        context.orderSoFar
+        context.orderSoFar,
+        context.customerContext
       );
     } catch (firstError) {
       console.error(`${tag} | gemini | FAILED (attempt 1):`, firstError);
@@ -330,7 +358,8 @@ export async function processInboundMessage(
           },
           effectiveContent,
           context.merchantContext,
-          context.orderSoFar
+          context.orderSoFar,
+          context.customerContext
         );
       } catch (secondError) {
         console.error(`${tag} | gemini | FAILED (attempt 2):`, secondError);
@@ -474,12 +503,26 @@ export async function processInboundMessage(
     const stockShortfalls = getStockShortfalls(validation, context.catalog);
     const finalizable = isFinalizable(validation, geminiResponse.missing_fields);
     const diagnostics = validation.diagnostics;
+    const replyLanguage = resolveReplyLanguage(
+      context.settings.responseLanguage,
+      effectiveContent
+    );
+
+    await persistGroundedCustomerProfile(supabase, {
+      merchantId,
+      customerId,
+      currentMessage: effectiveContent,
+      existing: context.customerProfile,
+      proposed: geminiResponse.customer_info,
+    });
 
     // Resolve the real stage. Start from the model's, then FORCE it down: an
     // order with a hard availability problem, a still-missing required field, or
     // an active escalation can never be ready_to_confirm/confirmed — it keeps
     // collecting. An order-intent "none" is treated as collecting.
     let stage: OrderStage = geminiResponse.order_stage;
+    let safeReply = reply;
+    let confirmationGuardTriggered = false;
     if (stage === "none") stage = "collecting";
     if (
       stage !== "cancelled" &&
@@ -487,6 +530,24 @@ export async function processInboundMessage(
       (stage === "ready_to_confirm" || stage === "confirmed")
     ) {
       stage = "collecting";
+    }
+
+    if (stage === "confirmed" && !context.canAcceptConfirmation) {
+      confirmationGuardTriggered = true;
+      stage = finalizable ? "ready_to_confirm" : "collecting";
+      if (finalizable) {
+        safeReply = buildConfirmationReadback(
+          validation.items,
+          geminiResponse.customer_info.delivery_address ??
+            context.customerProfile.deliveryAddress,
+          validation.total,
+          context.settings.currency,
+          replyLanguage
+        );
+      }
+      console.warn(
+        `${tag} | confirmation | rejected model confirmation without a persisted latest readback`
+      );
     }
     console.log(
       `${tag} | stage | model=${geminiResponse.order_stage} → resolved=${stage} (missing=${hasMissing}, hardProblem=${hardProblem}, escalate=${escalate}, finalizable=${finalizable})`
@@ -528,8 +589,21 @@ export async function processInboundMessage(
         collectingOrderId: context.collectingOrderId,
         collectionState: {
           missing_fields: geminiResponse.missing_fields,
-          awaiting_confirmation: stage === "ready_to_confirm",
-          last_readback: stage === "ready_to_confirm" ? reply : null,
+          awaiting_confirmation:
+            stage === "ready_to_confirm" ||
+            (stage === "confirmed" && context.canAcceptConfirmation),
+          last_readback:
+            stage === "ready_to_confirm"
+              ? safeReply
+              : context.collectionState?.last_readback ?? null,
+          customer_info: {
+            name: geminiResponse.customer_info.name ?? context.customerProfile.name,
+            phone:
+              geminiResponse.customer_info.phone ?? context.customerProfile.phone,
+            delivery_address:
+              geminiResponse.customer_info.delivery_address ??
+              context.customerProfile.deliveryAddress,
+          },
         },
       });
       orderId = result.orderId;
@@ -557,7 +631,11 @@ export async function processInboundMessage(
     if (stage === "confirmed" && finalizable && orderId) {
       await promoteCollectingToIncoming(supabase, orderId, merchantId);
       // Prefer the model's acknowledgement; fall back to a short templated ack.
-      await sendReply(escalate ? settings.handoffMessage : (reply ?? "Your order is placed ✅"));
+      await sendReply(
+        escalate
+          ? settings.handoffMessage
+          : safeReply ?? localizedOrderPlaced(replyLanguage)
+      );
       if (escalate) await raiseHandoffFlag(supabase, { merchantId, conversationId, messageId });
       console.log(`${tag} | action | order confirmed → promoted ${orderId.slice(0, 8)} to incoming`);
       await recordDecision(supabase, {
@@ -581,18 +659,21 @@ export async function processInboundMessage(
     if (escalate) {
       outgoing = settings.handoffMessage;
       await raiseHandoffFlag(supabase, { merchantId, conversationId, messageId });
-    } else if (stockShortfalls.length > 0 && !replyStatesShortfalls(reply, stockShortfalls)) {
-      outgoing = buildStockShortfallReply(stockShortfalls);
+    } else if (
+      stockShortfalls.length > 0 &&
+      !replyStatesShortfalls(safeReply, stockShortfalls)
+    ) {
+      outgoing = buildStockShortfallReply(stockShortfalls, replyLanguage);
       console.log(`${tag} | stock | reply did not surface shortfall → overriding with availability notice`);
     } else {
-      outgoing = reply;
+      outgoing = safeReply;
     }
     await sendReply(outgoing);
 
     const decisionCase =
       stage === "ready_to_confirm" ? "order_ready_to_confirm" : "order_collecting";
     console.log(
-      `${tag} | action | stage=${stage} → reply ${outgoing ? "sent" : "none"}, order=${orderId ? orderId.slice(0, 8) : "none (awaiting first item)"}`
+      `${tag} | action | stage=${stage} → reply ${outgoing ? "sent" : "none"}, order=${orderId ? orderId.slice(0, 8) : "none (awaiting first item)"}${confirmationGuardTriggered ? ", confirmationGuard=blocked" : ""}`
     );
     await recordDecision(supabase, {
       merchantId,
@@ -808,13 +889,112 @@ function replyStatesShortfalls(
  * Deterministic, truthful availability notice naming each product and the exact
  * amount on hand — used when the model failed to surface a stock shortfall.
  */
-function buildStockShortfallReply(shortfalls: StockShortfall[]): string {
+function buildStockShortfallReply(
+  shortfalls: StockShortfall[],
+  language: "ar" | "en"
+): string {
+  if (language === "ar") {
+    return shortfalls
+      .map(
+        (s) =>
+          `المتوفر حالياً من ${s.productName} هو ${s.available} فقط. هل يناسبك هذا العدد أم تفضل شيئاً آخر؟`
+      )
+      .join(" ");
+  }
   return shortfalls
     .map(
       (s) =>
         `Sorry, we only have ${s.available} of ${s.productName} right now. Would you like that amount, or something else?`
     )
     .join(" ");
+}
+
+function resolveReplyLanguage(
+  configured: string,
+  currentMessage: string
+): "ar" | "en" {
+  if (configured === "ar" || configured === "en") return configured;
+  return /[\u0600-\u06ff]/.test(currentMessage) ? "ar" : "en";
+}
+
+function localizedOrderPlaced(language: "ar" | "en"): string {
+  return language === "ar" ? "تم تأكيد طلبك ✅" : "Your order is confirmed ✅";
+}
+
+function buildConfirmationReadback(
+  items: Array<{
+    product_name: string;
+    variant: string | null;
+    quantity: number;
+  }>,
+  deliveryAddress: string | null,
+  total: number,
+  currency: string,
+  language: "ar" | "en"
+): string {
+  const itemText = items
+    .map((item) => {
+      const variant = item.variant ? ` (${item.variant})` : "";
+      return `${item.quantity}× ${item.product_name}${variant}`;
+    })
+    .join(language === "ar" ? "، " : ", ");
+  const address = deliveryAddress ?? (language === "ar" ? "غير محدد" : "not provided");
+
+  return language === "ar"
+    ? `للتأكيد: ${itemText}. المجموع ${total} ${currency}، والتوصيل إلى ${address}. هل أؤكد الطلب؟`
+    : `To confirm: ${itemText}. Total ${total} ${currency}, delivered to ${address}. Shall I place the order?`;
+}
+
+async function persistGroundedCustomerProfile(
+  supabase: ReturnType<typeof createAdminClient>,
+  params: {
+    merchantId: string;
+    customerId: string;
+    currentMessage: string;
+    existing: {
+      name: string | null;
+      phone: string | null;
+      deliveryAddress: string | null;
+    };
+    proposed: {
+      name?: string | null;
+      phone?: string | null;
+      delivery_address?: string | null;
+    };
+  }
+): Promise<void> {
+  const update: Record<string, string> = {};
+  if (
+    params.proposed.name !== params.existing.name &&
+    isGroundedProfileValue(params.proposed.name, params.currentMessage)
+  ) {
+    update.name = params.proposed.name;
+  }
+  if (
+    params.proposed.phone !== params.existing.phone &&
+    isGroundedProfileValue(params.proposed.phone, params.currentMessage)
+  ) {
+    update.phone = params.proposed.phone;
+  }
+  if (
+    params.proposed.delivery_address !== params.existing.deliveryAddress &&
+    isGroundedProfileValue(
+      params.proposed.delivery_address,
+      params.currentMessage
+    )
+  ) {
+    update.delivery_address = params.proposed.delivery_address;
+  }
+  if (Object.keys(update).length === 0) return;
+
+  const { error } = await supabase
+    .from("customers")
+    .update(update)
+    .eq("id", params.customerId)
+    .eq("merchant_id", params.merchantId);
+  if (error) {
+    console.error(`[AI Pipeline] customer profile update failed: ${error.message}`);
+  }
 }
 
 // --- Circuit breaker helpers ---
