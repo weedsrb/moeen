@@ -215,7 +215,7 @@ export async function processInboundMessage(
       return;
     }
     console.log(
-      `${tag} | context | ${context.conversationHistory.split("\n").length} messages, ${context.catalog.length} products, lastOutbound=${context.lastOutboundSenderType ?? "none"}`
+      `${tag} | context | v${context.aiRequest.v}, ${context.aiRequest.recent.length} recent messages, ${context.catalog.length} products, ${context.aiRequest.facts.faqs.length} FAQs, lastOutbound=${context.lastOutboundSenderType ?? "none"}`
     );
 
     if (isExplicitHumanRequest(effectiveContent)) {
@@ -393,21 +393,7 @@ export async function processInboundMessage(
 
     // --- Step 3: Call the configured AI provider (with one transient retry) ---
     let geminiResponse: GeminiResponse;
-    const callConversationModel = () =>
-      callGemini(
-        context.conversationHistory,
-        context.catalog,
-        {
-          confidenceThreshold: context.settings.confidenceThreshold,
-          currency: context.settings.currency,
-          requireCustomerName: context.settings.requireCustomerName,
-          requireCustomerPhone: context.settings.requireCustomerPhone,
-        },
-        effectiveContent,
-        context.merchantContext,
-        context.orderSoFar,
-        context.customerContext
-      );
+    const callConversationModel = () => callGemini(context.aiRequest);
 
     try {
       geminiResponse = await callConversationModel();

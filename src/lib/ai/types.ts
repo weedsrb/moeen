@@ -119,9 +119,67 @@ export interface CompressedProduct {
   stock: number;
 }
 
+// --- Provider-neutral compact request contract ---
+
+export interface AIRequestV1 {
+  v: 1;
+  business: {
+    name: string;
+    currency: string;
+    tone: string;
+    reply_language: string;
+    required_customer_fields: Array<"delivery_address" | "name" | "phone">;
+  };
+  admin_policy: {
+    assistant_name: string | null;
+    greeting: string | null;
+    business_context: string | null;
+    custom_instructions: string | null;
+  };
+  customer: {
+    name: string | null;
+    phone: string | null;
+    known_address: string | null;
+    language: "ar" | "en" | "mixed" | "unknown";
+  };
+  conversation: {
+    mode: "ai" | "human_takeover";
+    summary: string;
+    awaiting: "confirmation" | "field" | null;
+  };
+  order: {
+    id: string | null;
+    items: Array<{
+      product_id: string | null;
+      name: string;
+      quantity: number;
+      variant: string | null;
+      unit_price: number;
+    }>;
+    delivery_address: string | null;
+    total: number;
+    missing: string[];
+    last_readback: string | null;
+  };
+  facts: {
+    products: CompressedProduct[];
+    faqs: Array<{ question: string; answer: string }>;
+  };
+  recent: Array<{
+    role: "customer" | "assistant" | "merchant" | "system";
+    text: string;
+  }>;
+  current: {
+    message_ids: string[];
+    text: string;
+  };
+}
+
 // --- Context Assembly Output ---
 
 export interface AssembledContext {
+  /** Compact, versioned input passed to the full conversation model. */
+  aiRequest: AIRequestV1;
   conversationHistory: string;
   catalog: CompressedProduct[];
   customerContext: string;
