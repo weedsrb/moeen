@@ -79,6 +79,7 @@ export async function processInboundMessage(
     credentials,
     messageCreatedAt,
     skipDebounce,
+    executionMode = "inline",
   } = input;
 
   const supabase = createAdminClient();
@@ -120,7 +121,7 @@ export async function processInboundMessage(
     let burstIds: string[] = [messageId];
 
     if (!skipDebounce) {
-      await sleep(DEBOUNCE_MS);
+      if (executionMode === "inline") await sleep(DEBOUNCE_MS);
 
       // Successor check: is there a newer inbound *text* message (the only kind
       // that runs this pipeline) in this conversation? Ordering by
