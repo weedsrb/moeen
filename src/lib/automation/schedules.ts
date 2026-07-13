@@ -26,5 +26,12 @@ export async function runAutomationSchedule(
       dryRun,
     };
   }
+  if (workflowType === "customer-wait-alerts") {
+    const { data, error } = await _supabase.rpc("run_customer_wait_scan", {
+      p_dry_run: dryRun,
+    });
+    if (error) throw new Error(error.message);
+    return data as ScheduleResult;
+  }
   throw new Error(`Schedule not implemented yet: ${workflowType}`);
 }
