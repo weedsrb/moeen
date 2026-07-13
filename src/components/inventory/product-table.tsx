@@ -27,17 +27,40 @@ import {
 interface ProductTableProps {
   products: Product[];
   merchantThreshold?: number;
+  selectedIds?: Set<string>;
+  onToggleSelect?: (id: string) => void;
+  onToggleAll?: () => void;
 }
 
 export function ProductTable({
   products,
   merchantThreshold,
+  selectedIds,
+  onToggleSelect,
+  onToggleAll,
 }: ProductTableProps) {
+  const selectable = !!onToggleSelect;
+  const allSelected =
+    selectable &&
+    products.length > 0 &&
+    products.every((p) => selectedIds?.has(p.id));
+
   return (
     <div className="rounded-lg border overflow-hidden">
       <Table>
         <TableHeader>
           <TableRow>
+            {selectable && (
+              <TableHead className="w-10">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  onChange={onToggleAll}
+                  aria-label="Select all products"
+                  className="h-4 w-4 cursor-pointer rounded accent-[var(--color-primary)]"
+                />
+              </TableHead>
+            )}
             <TableHead className="w-12" />
             <TableHead>Name</TableHead>
             <TableHead>Price</TableHead>
@@ -53,11 +76,28 @@ export function ProductTable({
             const status = getStockStatus(product, merchantThreshold);
             const available = getAvailableQuantity(product);
 
+            const isSelected = selectedIds?.has(product.id) ?? false;
+
             return (
               <TableRow
                 key={product.id}
-                className={cn("cursor-pointer", getStockRowClass(status))}
+                className={cn(
+                  "cursor-pointer",
+                  getStockRowClass(status),
+                  isSelected && "bg-primary/5"
+                )}
               >
+                {selectable && (
+                  <TableCell>
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => onToggleSelect?.(product.id)}
+                      aria-label={`Select ${product.name}`}
+                      className="h-4 w-4 cursor-pointer rounded accent-[var(--color-primary)]"
+                    />
+                  </TableCell>
+                )}
                 <TableCell>
                   <Link href={`/inventory/${product.id}`}>
                     <div className="h-8 w-8 rounded bg-muted overflow-hidden flex items-center justify-center">

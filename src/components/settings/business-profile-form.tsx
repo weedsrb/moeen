@@ -1,7 +1,10 @@
 "use client";
 
 import { useActionState } from "react";
-import { createMerchantProfile, type OnboardingState } from "@/app/(onboarding)/onboarding/actions";
+import {
+  updateBusinessProfile,
+  type BusinessProfileState,
+} from "@/app/(app)/settings/actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -22,15 +25,21 @@ const businessTypes = [
   { value: "other", label: "Other" },
 ];
 
-export function BusinessBasicsForm({
-  submitLabel = "Get Started",
+export function BusinessProfileForm({
+  businessName,
+  businessType,
+  city,
+  phone,
 }: {
-  submitLabel?: string;
-} = {}) {
-  const [state, formAction, isPending] = useActionState<OnboardingState, FormData>(
-    createMerchantProfile,
-    {}
-  );
+  businessName: string;
+  businessType: string | null;
+  city: string | null;
+  phone: string | null;
+}) {
+  const [state, formAction, isPending] = useActionState<
+    BusinessProfileState,
+    FormData
+  >(updateBusinessProfile, {});
 
   return (
     <form action={formAction} className="space-y-4">
@@ -39,7 +48,7 @@ export function BusinessBasicsForm({
         <Input
           id="businessName"
           name="businessName"
-          placeholder="Your business name"
+          defaultValue={businessName}
           required
           minLength={2}
         />
@@ -47,7 +56,7 @@ export function BusinessBasicsForm({
 
       <div className="space-y-2">
         <Label htmlFor="businessType">Business Type *</Label>
-        <Select name="businessType" required>
+        <Select name="businessType" defaultValue={businessType ?? undefined} required>
           <SelectTrigger>
             <SelectValue placeholder="Select your business type" />
           </SelectTrigger>
@@ -66,6 +75,7 @@ export function BusinessBasicsForm({
         <Input
           id="city"
           name="city"
+          defaultValue={city ?? ""}
           placeholder="e.g. Ramallah, Gaza, Nablus"
         />
       </div>
@@ -76,17 +86,19 @@ export function BusinessBasicsForm({
           id="phone"
           name="phone"
           type="tel"
+          defaultValue={phone ?? ""}
           placeholder="+970 5XX XXX XXX"
         />
       </div>
 
-      {state.error && (
-        <p className="text-sm text-destructive">{state.error}</p>
+      {state.error && <p className="text-sm text-destructive">{state.error}</p>}
+      {state.success && (
+        <p className="text-sm text-status-confirmed">Saved.</p>
       )}
 
-      <Button type="submit" className="w-full" disabled={isPending}>
+      <Button type="submit" disabled={isPending}>
         {isPending && <Loader2 className="me-2 h-4 w-4 animate-spin" />}
-        {submitLabel}
+        Save Changes
       </Button>
     </form>
   );

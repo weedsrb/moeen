@@ -1,37 +1,30 @@
-import { redirect } from "next/navigation";
+import Link from "next/link";
 import {
   Card,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
 import { BusinessBasicsForm } from "@/components/onboarding/business-basics-form";
-import { getMerchantCached, requireUser } from "@/lib/auth/require-merchant";
 
-export default async function OnboardingPage() {
-  const { user } = await requireUser();
-  const merchant = await getMerchantCached(user.id);
-  if (merchant?.onboarding_completed) redirect("/dashboard");
-
+export default function AddBusinessPage() {
   return (
     <div className="flex min-h-screen items-center justify-center px-4">
       <Card className="w-full max-w-md">
         <CardHeader className="text-center">
           <CardTitle className="text-2xl font-bold">
-            Welcome to Mo&apos;een
+            Add another business
           </CardTitle>
-          <CardDescription className="font-arabic text-base">
-            مرحبا بك في معين
-          </CardDescription>
           <p className="text-sm text-muted-foreground mt-2">
-            Let&apos;s set up your business
+            Set up a new, independent business under your account
           </p>
         </CardHeader>
         <CardContent>
-          <BusinessBasicsForm />
+          <BusinessBasicsForm submitLabel="Create Business" />
           <p className="text-xs text-muted-foreground text-center mt-4">
-            Step 1 of 1
+            <Link href="/settings/businesses" className="underline">
+              Cancel
+            </Link>
           </p>
         </CardContent>
       </Card>

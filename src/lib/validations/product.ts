@@ -27,6 +27,18 @@ export const createProductSchema = z.object({
 
 export const updateProductSchema = createProductSchema.partial();
 
+export const bulkIdsSchema = z.object({
+  ids: z
+    .array(z.string().uuid())
+    .min(1, "Select at least one product")
+    .max(500, "Too many products selected at once"),
+});
+
+// Activate/deactivate toggle (soft, reversible): false = archive, true = restore.
+export const bulkStatusSchema = bulkIdsSchema.extend({
+  is_active: z.boolean(),
+});
+
 export const stockAdjustmentSchema = z.object({
   adjustment: z
     .number()
@@ -38,3 +50,5 @@ export const stockAdjustmentSchema = z.object({
 export type CreateProductInput = z.infer<typeof createProductSchema>;
 export type UpdateProductInput = z.infer<typeof updateProductSchema>;
 export type StockAdjustmentInput = z.infer<typeof stockAdjustmentSchema>;
+export type BulkIdsInput = z.infer<typeof bulkIdsSchema>;
+export type BulkStatusInput = z.infer<typeof bulkStatusSchema>;
