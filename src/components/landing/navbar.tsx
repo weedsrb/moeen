@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { MouseEvent } from "react";
+import Link from "next/link";
 import { Menu, Moon, Sun, X } from "lucide-react";
 import { useTheme } from "@/components/theme-provider";
 import { cn } from "@/lib/utils";
@@ -153,6 +154,13 @@ export function Navbar() {
           >
             Request early access
           </a>
+          <Link
+            className={cn(styles.btn, styles.btnOutline, styles.btnMd, styles.desktopOnly)}
+            href="/login"
+            style={{ height: 36 }}
+          >
+            Log in
+          </Link>
           <button
             aria-label="Menu"
             className={cn(styles.btn, styles.btnOutline, styles.mobileMenuButton)}
@@ -195,6 +203,14 @@ export function Navbar() {
           >
             Request early access
           </a>
+          <Link
+            className={cn(styles.btn, styles.btnOutline, styles.btnMd)}
+            href="/login"
+            onClick={() => setMobileOpen(false)}
+            style={{ marginTop: 10 }}
+          >
+            Log in
+          </Link>
         </div>
       )}
     </header>
