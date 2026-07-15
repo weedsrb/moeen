@@ -33,7 +33,16 @@ the Compose profile does not inherit production automation credentials.
 ## Operations
 
 - Run `scripts/backup.sh` nightly from cron and copy `.age` files off the VM.
+  Backups are recipient-encrypted to the public `BACKUP_AGE_RECIPIENT`; only
+  that public key needs to live in the server `.env`.
 - Perform a restore drill with `scripts/restore.sh` before enabling workflows.
+  Because the backups are recipient-encrypted, `restore.sh` needs the matching
+  age **identity** (private key) to decrypt, supplied via `BACKUP_AGE_IDENTITY`
+  (path to the identity file). Keep that identity OFF the server on the
+  operator's machine; run the drill against a non-production target and export
+  `BACKUP_AGE_IDENTITY=/path/to/identity` for that invocation only. The script
+  fails fast if the identity is missing or unreadable, before it touches the
+  database. Backups land in `BACKUP_DIR` (defaults to `./backups`).
 - Review image pins monthly. Upgrade staging first and back up before changing a
   tag. Production currently pins n8n 2.29.10, PostgreSQL 16.10, and Traefik 3.5.4.
 - Execution data is pruned after seven days by default. Successful executions

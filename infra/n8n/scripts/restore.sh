@@ -12,11 +12,17 @@ backup_file="$1"
 test -f "$backup_file" || { echo "Backup not found: $backup_file" >&2; exit 1; }
 command -v age >/dev/null 2>&1 || { echo "Install age first" >&2; exit 1; }
 
+# Backups are recipient-encrypted (age -r), so decryption REQUIRES the matching
+# identity (private key) file. Validate it before touching the database: the
+# psql pipeline below runs with the dump's --clean and is destructive.
+test -n "${BACKUP_AGE_IDENTITY:-}" || { echo "BACKUP_AGE_IDENTITY is required (path to the age identity file)" >&2; exit 1; }
+test -r "$BACKUP_AGE_IDENTITY" || { echo "BACKUP_AGE_IDENTITY not found or not readable: $BACKUP_AGE_IDENTITY" >&2; exit 1; }
+
 echo "This replaces the n8n database. Type RESTORE to continue:"
 read -r confirmation
 test "$confirmation" = "RESTORE" || { echo "Cancelled"; exit 1; }
 
-age --decrypt "$backup_file" \
+age --decrypt -i "$BACKUP_AGE_IDENTITY" "$backup_file" \
   | gunzip \
   | docker compose exec -T postgres psql --username "$N8N_DB_USER" --dbname "$N8N_DB_NAME"
 
